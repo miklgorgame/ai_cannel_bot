@@ -3,22 +3,24 @@ name: Auto Post to Telegram Channel
 on:
   schedule:
     - cron: '0 * * * *'  # Каждый час
-  workflow_dispatch:     # Можно запустить вручную
+  workflow_dispatch:     # Ручной запуск
 
 jobs:
   post-job:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout Code
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4   # лучше использовать v4
 
       - name: Set up Python
-        uses: actions/setup-python@v4
+        uses: actions/setup-python@v5
         with:
-          python-version: '3.9'
+          python-version: '3.11'   # свежая версия
 
       - name: Install Dependencies
-        run: pip install requests
+        run: |
+          pip install requests
+          pip install huggingface_hub   # главная библиотека
 
       - name: Run Bot
         env:
