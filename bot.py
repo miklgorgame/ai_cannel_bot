@@ -9,7 +9,7 @@ TG_BOT_TOKEN = os.getenv("TG_BOT_TOKEN")
 TG_CHAT_ID = os.getenv("TG_CHAT_ID")
 
 # URL роутера Hugging Face (OpenAI-совместимый)
-HF_API_URL = "https://router.huggingface.co/hf-inference/v1"
+MODEL_NAME = "meta-llama/Llama-3.2-3B-Instruct"
 
 # ✅ Используем модель, которая точно доступна через бесплатный Inference API
 #    (у неё в списке провайдеров есть "hf-inference")
