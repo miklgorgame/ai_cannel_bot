@@ -4,12 +4,10 @@ import json
 import re
 from typing import List, Tuple, Optional
 
-# --- КОНФИГУРАЦИЯ ---
 HF_API_TOKEN = os.getenv("HF_API_TOKEN")
 TG_BOT_TOKEN = os.getenv("TG_BOT_TOKEN")
-TG_CHAT_ID = os.getenv("TG_CHAT_ID")   # <-- исправлено: закрывающая кавычка
+TG_CHAT_ID = os.getenv("TG_CHAT_ID")
 
-# Правильные URL для роутера Hugging Face
 ROUTER_MODELS_URL = "https://router.huggingface.co/v1/models"
 ROUTER_CHAT_URL = "https://router.huggingface.co/hf-inference/v1/chat/completions"
 
@@ -28,153 +26,142 @@ def escape_markdown(text: str) -> str:
     special_chars = r'_*[]()~`>#+-=|{}.!'
     return re.sub(f'([{re.escape(special_chars)}])', r'\\\1', text)
 
-def fetch_router_models(api_token: str) -> List[str]:
-    """Получает список моделей, доступных через роутер Hugging Face."""
-    print("🔍 Запрашиваю список моделей из роутера Hugging Face...")
+def fetch_router_models_with_providers(api_token: str) -> List[Tuple[str, str]]:
+    """
+    Возвращает список кортежей (model_id, provider) для всех моделей,
+    у которых есть хотя бы один live-провайдер.
+    """
     headers = {"Authorization": f"Bearer {api_token}"}
     try:
-        response = requests.get(ROUTER_MODELS_URL, headers=headers, timeout=30)
-        response.raise_for_status()
-        data = response.json()
-        models = [item["id"] for item in data.get("data", []) if "id" in item]
-        print(f"✅ Найдено {len(models)} моделей в роутере.")
-        return models
+        resp = requests.get(ROUTER_MODELS_URL, headers=headers, timeout=30)
+        resp.raise_for_status()
+        data = resp.json()
+        result = []
+        for model in data.get("data", []):
+            model_id = model.get("id")
+            providers = model.get("providers", [])
+            for p in providers:
+                if p.get("status") == "live":
+                    result.append((model_id, p.get("provider")))
+                    break  # берём первого живого провайдера
+        print(f"✅ Найдено {len(result)} связок модель+провайдер.")
+        return result
     except Exception as e:
-        print(f"❌ Ошибка при получении списка моделей из роутера: {e}")
+        print(f"❌ Ошибка получения списка: {e}")
         return []
 
 def find_and_cache_working_models(api_token: str) -> List[str]:
-    """Находит рабочие модели (те, на которые роутер отвечает 200), кэширует и возвращает."""
+    """Проверяет каждую связку модель:провайдер коротким запросом."""
     if os.path.exists(WORKING_MODELS_FILE):
         try:
-            with open(WORKING_MODELS_FILE, "r", encoding="utf-8") as f:
+            with open(WORKING_MODELS_FILE, "r") as f:
                 cached = json.load(f)
             if cached:
-                print(f"📦 Загружено {len(cached)} моделей из кэша.")
+                print(f"📦 Загружено {len(cached)} рабочих моделей из кэша.")
                 return cached
         except Exception as e:
-            print(f"⚠️ Не удалось загрузить кэш: {e}")
+            print(f"⚠️ Ошибка чтения кэша: {e}")
 
-    print("💡 Кэш не найден или пуст. Получаю список моделей из роутера...")
-    all_models = fetch_router_models(api_token)
-    if not all_models:
+    print("💡 Получаю список моделей с провайдерами...")
+    model_provider_pairs = fetch_router_models_with_providers(api_token)
+    if not model_provider_pairs:
         return []
 
-    print(f"🔎 Проверяю доступность {len(all_models)} моделей (может занять минуту)...")
+    print(f"🔎 Проверяю доступность {len(model_provider_pairs)} связок (первые 30)...")
     working = []
-    for model_id in all_models:
+    for model_id, provider in model_provider_pairs[:30]:
+        full_model = f"{model_id}:{provider}"
         headers = {"Authorization": f"Bearer {api_token}", "Content-Type": "application/json"}
         payload = {
-            "model": model_id,
-            "messages": [{"role": "user", "content": "Hi"}],
+            "model": full_model,
+            "messages": [{"role": "user", "content": "Привет"}],
             "max_tokens": 5,
             "stream": False
         }
         try:
             resp = requests.post(ROUTER_CHAT_URL, headers=headers, json=payload, timeout=30)
             if resp.status_code == 200:
-                working.append(model_id)
-                print(f"  ✅ {model_id} — доступна.")
-        except:
-            pass
+                working.append(full_model)
+                print(f"  ✅ {full_model} — работает.")
+            else:
+                print(f"  ❌ {full_model} — ошибка {resp.status_code}: {resp.text[:60]}")
+        except Exception as e:
+            print(f"  ❌ {full_model} — исключение: {str(e)[:60]}")
+
     if working:
-        with open(WORKING_MODELS_FILE, "w", encoding="utf-8") as f:
-            json.dump(working, f, indent=2, ensure_ascii=False)
-        print(f"💾 Найдено и сохранено {len(working)} рабочих моделей.")
+        with open(WORKING_MODELS_FILE, "w") as f:
+            json.dump(working, f, indent=2)
+        print(f"💾 Сохранено {len(working)} рабочих моделей.")
     else:
-        print("⚠️ Не найдено ни одной рабочей модели через роутер.")
+        print("⚠️ Не найдено ни одной рабочей модели.")
     return working
 
 def generate_content_with_fallback(api_token: str, model_list: List[str]) -> Tuple[bool, str, Optional[str]]:
     if not model_list:
-        return False, "❌ Список доступных моделей пуст.", None
+        return False, "❌ Нет доступных моделей.", None
 
-    for model_id in model_list:
-        print(f"🔄 Пробую модель: {model_id}")
+    for full_model in model_list:
+        print(f"🔄 Пробую {full_model}")
         headers = {"Authorization": f"Bearer {api_token}", "Content-Type": "application/json"}
         payload = {
-            "model": model_id,
+            "model": full_model,
             "messages": [{"role": "user", "content": PROMPT}],
             "max_tokens": 400,
             "temperature": 0.7,
             "stream": False
         }
         try:
-            response = requests.post(ROUTER_CHAT_URL, headers=headers, json=payload, timeout=60)
-            if response.status_code == 200:
-                result = response.json()
+            resp = requests.post(ROUTER_CHAT_URL, headers=headers, json=payload, timeout=60)
+            if resp.status_code == 200:
+                result = resp.json()
                 if "choices" in result and result["choices"]:
                     text = result["choices"][0]["message"]["content"].strip()
                     if text:
-                        print(f"✅ Успех! Пост создан с помощью {model_id}.")
-                        return True, text, model_id
-                    else:
-                        print(f"⚠️ Модель {model_id} вернула пустой ответ.")
-                else:
-                    print(f"⚠️ Неожиданный формат ответа от {model_id}.")
-            else:
-                print(f"⚠️ Модель {model_id} вернула ошибку {response.status_code}. Пробую следующую...")
+                        print(f"✅ Пост создан через {full_model}")
+                        return True, text, full_model
+            print(f"⚠️ {full_model} ответил {resp.status_code}: {resp.text[:100]}")
         except Exception as e:
-            print(f"⚠️ Ошибка с моделью {model_id}: {str(e)[:100]}. Пробую следующую...")
-    return False, "❌ Все доступные модели из списка не смогли создать пост.", None
+            print(f"⚠️ Ошибка с {full_model}: {str(e)[:100]}")
+    return False, "❌ Все модели не смогли создать пост.", None
 
 def send_to_telegram(text: str, is_error: bool = False) -> bool:
     if not TG_BOT_TOKEN or not TG_CHAT_ID:
-        print("❌ Ошибка: Не указаны токен бота или ID чата.")
+        print("❌ Нет токена или chat_id")
         return False
-
     url = f"https://api.telegram.org/bot{TG_BOT_TOKEN}/sendMessage"
     if is_error:
         payload = {"chat_id": TG_CHAT_ID, "text": text}
-        try:
-            resp = requests.post(url, json=payload, timeout=30)
-            if resp.status_code == 200:
-                print("✅ Сообщение об ошибке отправлено в Telegram.")
-                return True
-            else:
-                print(f"❌ Не удалось отправить ошибку: {resp.text}")
-                return False
-        except Exception as e:
-            print(f"❌ Ошибка при отправке: {e}")
-            return False
     else:
-        safe_text = escape_markdown(text)
-        payload = {"chat_id": TG_CHAT_ID, "text": safe_text, "parse_mode": "MarkdownV2"}
-        try:
-            resp = requests.post(url, json=payload, timeout=30)
-            if resp.status_code == 200:
-                print("✅ Пост успешно опубликован!")
+        safe = escape_markdown(text)
+        payload = {"chat_id": TG_CHAT_ID, "text": safe, "parse_mode": "MarkdownV2"}
+    try:
+        resp = requests.post(url, json=payload, timeout=30)
+        if resp.status_code == 200:
+            print("✅ Сообщение отправлено в Telegram")
+            return True
+        if not is_error and "can't parse entities" in resp.text:
+            payload2 = {"chat_id": TG_CHAT_ID, "text": text}
+            resp2 = requests.post(url, json=payload2, timeout=30)
+            if resp2.status_code == 200:
+                print("✅ Отправлено без форматирования")
                 return True
-            elif resp.status_code == 400 and "can't parse entities" in resp.text:
-                print("⚠️ Ошибка Markdown, отправляем без форматирования...")
-                payload2 = {"chat_id": TG_CHAT_ID, "text": text}
-                resp2 = requests.post(url, json=payload2, timeout=30)
-                return resp2.status_code == 200
-            else:
-                print(f"❌ Ошибка отправки: {resp.text}")
-                return False
-        except Exception as e:
-            print(f"❌ Ошибка: {e}")
-            return False
+        print(f"❌ Ошибка Telegram: {resp.text}")
+        return False
+    except Exception as e:
+        print(f"❌ Исключение: {e}")
+        return False
 
 if __name__ == "__main__":
     print("🚀 Запуск генерации поста...")
-
     if not HF_API_TOKEN:
-        send_to_telegram("❌ Не указан токен Hugging Face.", is_error=True)
+        send_to_telegram("❌ Отсутствует HF_API_TOKEN", is_error=True)
         exit(1)
-
-    working_models = find_and_cache_working_models(HF_API_TOKEN)
-    if not working_models:
-        send_to_telegram("❌ Не найдено ни одной доступной модели через роутер.", is_error=True)
+    working = find_and_cache_working_models(HF_API_TOKEN)
+    if not working:
+        send_to_telegram("❌ Не найдено рабочих моделей. Проверьте токен или подключение.", is_error=True)
         exit(1)
-
-    success, content, used_model = generate_content_with_fallback(HF_API_TOKEN, working_models)
-
+    success, content, used = generate_content_with_fallback(HF_API_TOKEN, working)
     if success:
-        print(f"📝 Пост (модель {used_model}):\n{content}\n")
-        if not send_to_telegram(content, is_error=False):
-            send_to_telegram("⚠️ Пост создан, но не отправлен в Telegram.", is_error=True)
+        send_to_telegram(content, is_error=False)
     else:
-        print(f"[PUBLISH_FAIL] {content}")
         send_to_telegram(content, is_error=True)
