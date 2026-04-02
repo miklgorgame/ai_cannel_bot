@@ -2,13 +2,18 @@ name: Auto Post to Telegram Channel
 
 on:
   schedule:
-    - cron: '0 * * * *'  # Каждый час
+    - cron: '0 8 * * *'  # Запуск каждый день в 8:00 UTC (12:00 по Ижевску)
   workflow_dispatch:     # Ручной запуск
 
 jobs:
   post-job:
     runs-on: ubuntu-latest
     steps:
+      - name: Set timezone to Europe/Samara
+        uses: szenius/set-timezone@v2.0
+        with:
+          timezoneLinux: "Europe/Samara"
+
       - name: Checkout Code
         uses: actions/checkout@v4
 
@@ -17,7 +22,6 @@ jobs:
         with:
           python-version: '3.11'
 
-      # Кэширование зависимостей pip
       - name: Cache pip dependencies
         uses: actions/cache@v3
         with:
@@ -26,7 +30,6 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-pip-
 
-      # Кэширование SQLite базы данных для сохранения памяти бота
       - name: Cache SQLite database
         uses: actions/cache@v3
         with:
