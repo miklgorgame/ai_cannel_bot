@@ -35,7 +35,7 @@ def generate_content():
     }
     
     payload = {
-        "model": "IlyaGusev/saiga_llama3_8b",   # можно заменить на другую модель
+        "model": "mistralai/Mistral-7B-Instruct-v0.3",   # можно заменить на другую модель
         "messages": [
             {"role": "user", "content": PROMPT}
         ],
