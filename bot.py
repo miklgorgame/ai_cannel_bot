@@ -8,12 +8,12 @@ HF_API_TOKEN = os.getenv("HF_API_TOKEN")
 TG_BOT_TOKEN = os.getenv("TG_BOT_TOKEN")
 TG_CHAT_ID = os.getenv("TG_CHAT_ID")
 
-# НОВЫЙ URL роутера Hugging Face (OpenAI-совместимый)
+# URL роутера Hugging Face (OpenAI-совместимый)
 HF_API_URL = "https://router.huggingface.co/hf-inference/v1"
 
-# ВЫБОР РАБОЧЕЙ МОДЕЛИ (доступна из списка, который вы получили через curl)
-# Можно заменить на любую другую из списка, например "Qwen/Qwen2.5-7B-Instruct"
-MODEL_NAME = "meta-llama/Llama-3.1-8B-Instruct"
+# ✅ Используем модель, которая точно доступна через бесплатный Inference API
+#    (у неё в списке провайдеров есть "hf-inference")
+MODEL_NAME = "katanemo/Arch-Router-1.5B"
 
 PROMPT = """
 Ты — опытный Python-разработчик и энтузиаст IT. 
@@ -63,7 +63,6 @@ def generate_content():
             else:
                 return False, f"⚠️ Неожиданный формат ответа: {result}"
         else:
-            # Обработка ошибок
             error_text = response.text[:200]
             if response.status_code == 404:
                 return False, f"❌ Модель '{MODEL_NAME}' не найдена или недоступна. Проверьте имя модели."
@@ -86,23 +85,23 @@ def generate_content():
 def send_to_telegram(text, is_error=False):
     """
     Отправляет сообщение в Telegram.
-    Если is_error=True, то не экранируем Markdown (чтобы ошибки читались нормально),
-    но при необходимости отправляем без форматирования.
+    Если is_error=True – отправляет как обычный текст (без Markdown).
     """
     if not TG_BOT_TOKEN or not TG_CHAT_ID:
         print("❌ Ошибка: Не указаны токен бота или ID чата.")
         return False
 
-    # Для ошибок используем обычный текст без Markdown (чтобы не ломать экранирование)
+    url = f"https://api.telegram.org/bot{TG_BOT_TOKEN}/sendMessage"
+    
     if is_error:
+        # Для ошибок – просто текст, без parse_mode
         payload = {
             "chat_id": TG_CHAT_ID,
-            "text": text,
-            "parse_mode": None
+            "text": text
         }
+        # Убираем parse_mode, если он не нужен (не передаём поле)
         try:
-            resp = requests.post(f"https://api.telegram.org/bot{TG_BOT_TOKEN}/sendMessage",
-                                 json=payload, timeout=30)
+            resp = requests.post(url, json=payload, timeout=30)
             if resp.status_code == 200:
                 print("✅ Сообщение об ошибке отправлено в Telegram.")
                 return True
@@ -112,40 +111,38 @@ def send_to_telegram(text, is_error=False):
         except Exception as e:
             print(f"❌ Ошибка при отправке ошибки: {str(e)}")
             return False
-
-    # Для обычного поста – экранируем Markdown
-    safe_text = escape_markdown(text)
-    url = f"https://api.telegram.org/bot{TG_BOT_TOKEN}/sendMessage"
-    payload = {
-        "chat_id": TG_CHAT_ID,
-        "text": safe_text,
-        "parse_mode": "MarkdownV2"
-    }
-
-    try:
-        resp = requests.post(url, json=payload, timeout=30)
-        if resp.status_code == 200:
-            print("✅ Пост успешно опубликован в канале!")
-            return True
-        else:
-            # Если экранирование не помогло, пробуем отправить без форматирования
-            if resp.status_code == 400 and "can't parse entities" in resp.text:
-                print("⚠️ Ошибка парсинга Markdown, отправляем без форматирования...")
-                payload["parse_mode"] = None
-                payload["text"] = text  # исходный текст
-                resp2 = requests.post(url, json=payload, timeout=30)
-                if resp2.status_code == 200:
-                    print("✅ Пост отправлен без форматирования.")
-                    return True
-                else:
-                    print(f"❌ Ошибка повторной отправки: {resp2.text}")
-                    return False
+    else:
+        # Для обычного поста – экранируем Markdown
+        safe_text = escape_markdown(text)
+        payload = {
+            "chat_id": TG_CHAT_ID,
+            "text": safe_text,
+            "parse_mode": "MarkdownV2"
+        }
+        try:
+            resp = requests.post(url, json=payload, timeout=30)
+            if resp.status_code == 200:
+                print("✅ Пост успешно опубликован в канале!")
+                return True
             else:
-                print(f"❌ Ошибка отправки в Telegram: {resp.text}")
-                return False
-    except Exception as e:
-        print(f"❌ Ошибка при отправке: {str(e)}")
-        return False
+                # Если экранирование не помогло, пробуем отправить без форматирования
+                if resp.status_code == 400 and "can't parse entities" in resp.text:
+                    print("⚠️ Ошибка парсинга Markdown, отправляем без форматирования...")
+                    payload.pop("parse_mode", None)  # убираем parse_mode
+                    payload["text"] = text          # исходный текст
+                    resp2 = requests.post(url, json=payload, timeout=30)
+                    if resp2.status_code == 200:
+                        print("✅ Пост отправлен без форматирования.")
+                        return True
+                    else:
+                        print(f"❌ Ошибка повторной отправки: {resp2.text}")
+                        return False
+                else:
+                    print(f"❌ Ошибка отправки в Telegram: {resp.text}")
+                    return False
+        except Exception as e:
+            print(f"❌ Ошибка при отправке: {str(e)}")
+            return False
 
 if __name__ == "__main__":
     print("🚀 Запуск генерации поста...")
@@ -164,7 +161,6 @@ if __name__ == "__main__":
         # Генерация не удалась – отправляем ошибку в Telegram
         error_message = f"❌ *Ошибка генерации поста*\n\n{content}"
         print(f"[PUBLISH_FAIL] Генерация не удалась: {content}")
-        # Отправляем ошибку в канал
         if send_to_telegram(error_message, is_error=True):
             print("[PUBLISH_FAIL] Сообщение об ошибке доставлено в Telegram.")
         else:
