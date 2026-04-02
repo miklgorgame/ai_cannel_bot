@@ -10,17 +10,36 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout Code
-        uses: actions/checkout@v4   # лучше использовать v4
+        uses: actions/checkout@v4
 
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.11'   # свежая версия
+          python-version: '3.11'
+
+      # Кэширование зависимостей pip
+      - name: Cache pip dependencies
+        uses: actions/cache@v3
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('**/requirements.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-pip-
+
+      # Кэширование SQLite базы данных для сохранения памяти бота
+      - name: Cache SQLite database
+        uses: actions/cache@v3
+        with:
+          path: bot_memory.db
+          key: bot-memory-${{ github.run_id }}
+          restore-keys: |
+            bot-memory-
 
       - name: Install Dependencies
         run: |
           pip install requests
-          pip install huggingface_hub   # главная библиотека
+          pip install huggingface_hub
+          pip install feedparser
 
       - name: Run Bot
         env:
