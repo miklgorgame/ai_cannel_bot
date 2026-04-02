@@ -1,0 +1,32 @@
+name: Auto Post to Telegram Channel
+
+on:
+  schedule:
+    # Запуск каждый час в 00 минут (по UTC). 
+    # Если нужно другое время, используй калькулятор cron (например, каждые 3 часа: '0 */3 * * *')
+    - cron: '0 * * * *'
+  
+  # Позволяет запустить вручную через вкладку Actions для теста
+  workflow_dispatch:
+
+jobs:
+  post-job:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v3
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.9'
+
+      - name: Install Dependencies
+        run: pip install requests
+
+      - name: Run Bot
+        env:
+          HF_API_TOKEN: ${{ secrets.HF_API_TOKEN }}
+          TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
+          TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
+        run: python bot.py
