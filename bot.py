@@ -13,7 +13,7 @@ HF_API_URL = "https://router.huggingface.co/hf-inference/v1"
 
 # ✅ Используем модель, которая точно доступна через бесплатный Inference API
 #    (у неё в списке провайдеров есть "hf-inference")
-MODEL_NAME = "katanemo/Arch-Router-1.5B"
+MODEL_NAME = "meta-llama/Llama-3.2-3B-Instruct:hyperbolic"
 
 PROMPT = """
 Ты — опытный Python-разработчик и энтузиаст IT. 
