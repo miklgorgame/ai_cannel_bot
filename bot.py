@@ -8,8 +8,12 @@ HF_API_TOKEN = os.getenv("HF_API_TOKEN")
 TG_BOT_TOKEN = os.getenv("TG_BOT_TOKEN")
 TG_CHAT_ID = os.getenv("TG_CHAT_ID")
 
-# Новый URL для роутера Hugging Face (совместим с OpenAI API)
+# НОВЫЙ URL роутера Hugging Face (OpenAI-совместимый)
 HF_API_URL = "https://router.huggingface.co/hf-inference/v1"
+
+# ВЫБОР РАБОЧЕЙ МОДЕЛИ (доступна из списка, который вы получили через curl)
+# Можно заменить на любую другую из списка, например "Qwen/Qwen2.5-7B-Instruct"
+MODEL_NAME = "meta-llama/Llama-3.1-8B-Instruct"
 
 PROMPT = """
 Ты — опытный Python-разработчик и энтузиаст IT. 
@@ -21,35 +25,35 @@ PROMPT = """
 """
 
 def escape_markdown(text: str) -> str:
-    """Экранирует специальные символы Markdown для Telegram."""
+    """Экранирует спецсимволы MarkdownV2 для Telegram."""
     special_chars = r'_*[]()~`>#+-=|{}.!'
     return re.sub(f'([{re.escape(special_chars)}])', r'\\\1', text)
 
 def generate_content():
+    """Генерирует пост через HF Inference API. Возвращает (success, content_or_error)."""
     if not HF_API_TOKEN:
-        return None, "❌ Ошибка: Не указан токен Hugging Face."
-    
+        return False, "❌ Ошибка: не указан токен Hugging Face."
+
     headers = {
         "Authorization": f"Bearer {HF_API_TOKEN}",
         "Content-Type": "application/json"
     }
-    
+
     payload = {
-        "model": "mistralai/Mistral-7B-Instruct-v0.3",   # можно заменить на другую модель
+        "model": MODEL_NAME,
         "messages": [
             {"role": "user", "content": PROMPT}
         ],
-        "max_tokens": 300,
+        "max_tokens": 400,
         "temperature": 0.7,
         "stream": False
     }
-    
+
     try:
         response = requests.post(HF_API_URL, headers=headers, json=payload, timeout=60)
-        
+
         if response.status_code == 200:
             result = response.json()
-            # Новый формат ответа: { choices: [{ message: { content: ... } }] }
             if "choices" in result and len(result["choices"]) > 0:
                 generated_text = result["choices"][0]["message"]["content"].strip()
                 if generated_text:
@@ -59,17 +63,17 @@ def generate_content():
             else:
                 return False, f"⚠️ Неожиданный формат ответа: {result}"
         else:
-            # Обработка ошибок нового API
-            error_msg = response.text[:200]
-            if response.status_code == 410:
-                return False, "❌ API устарел. Убедитесь, что используется router.huggingface.co"
+            # Обработка ошибок
+            error_text = response.text[:200]
+            if response.status_code == 404:
+                return False, f"❌ Модель '{MODEL_NAME}' не найдена или недоступна. Проверьте имя модели."
             elif response.status_code == 403:
                 return False, "❌ Доступ запрещён. Проверьте токен Hugging Face."
-            elif response.status_code == 404:
-                return False, "❌ Модель не найдена или недоступна на новом API."
+            elif response.status_code == 429:
+                return False, "⚠️ Слишком много запросов. Попробуйте позже."
             else:
-                return False, f"Ошибка API HF ({response.status_code}): {error_msg}"
-            
+                return False, f"❌ Ошибка API HF ({response.status_code}): {error_text}"
+
     except requests.exceptions.Timeout:
         return False, "❌ Таймаут соединения с Hugging Face."
     except requests.exceptions.ConnectionError:
@@ -79,21 +83,45 @@ def generate_content():
     except Exception as e:
         return False, f"❌ Неизвестная ошибка: {str(e)}"
 
-def send_to_telegram(text):
+def send_to_telegram(text, is_error=False):
+    """
+    Отправляет сообщение в Telegram.
+    Если is_error=True, то не экранируем Markdown (чтобы ошибки читались нормально),
+    но при необходимости отправляем без форматирования.
+    """
     if not TG_BOT_TOKEN or not TG_CHAT_ID:
         print("❌ Ошибка: Не указаны токен бота или ID чата.")
         return False
-    
-    # Экранируем текст для безопасной отправки в Markdown
+
+    # Для ошибок используем обычный текст без Markdown (чтобы не ломать экранирование)
+    if is_error:
+        payload = {
+            "chat_id": TG_CHAT_ID,
+            "text": text,
+            "parse_mode": None
+        }
+        try:
+            resp = requests.post(f"https://api.telegram.org/bot{TG_BOT_TOKEN}/sendMessage",
+                                 json=payload, timeout=30)
+            if resp.status_code == 200:
+                print("✅ Сообщение об ошибке отправлено в Telegram.")
+                return True
+            else:
+                print(f"❌ Не удалось отправить ошибку в Telegram: {resp.text}")
+                return False
+        except Exception as e:
+            print(f"❌ Ошибка при отправке ошибки: {str(e)}")
+            return False
+
+    # Для обычного поста – экранируем Markdown
     safe_text = escape_markdown(text)
-    
     url = f"https://api.telegram.org/bot{TG_BOT_TOKEN}/sendMessage"
     payload = {
         "chat_id": TG_CHAT_ID,
         "text": safe_text,
-        "parse_mode": "MarkdownV2"   # используем более новую версию Markdown
+        "parse_mode": "MarkdownV2"
     }
-    
+
     try:
         resp = requests.post(url, json=payload, timeout=30)
         if resp.status_code == 200:
@@ -121,14 +149,23 @@ def send_to_telegram(text):
 
 if __name__ == "__main__":
     print("🚀 Запуск генерации поста...")
-    
+
     success, content = generate_content()
-    
+
     if success:
         print(f"📝 Сгенерированный текст:\n{content}\n")
-        if send_to_telegram(content):
-            print("[PUBLISH_SUCCESS] Post sent to Telegram.")
+        if send_to_telegram(content, is_error=False):
+            print("[PUBLISH_SUCCESS] Пост отправлен в Telegram.")
         else:
-            print("[PUBLISH_FAIL] Failed to send post.")
+            print("[PUBLISH_FAIL] Не удалось отправить пост.")
+            # Дополнительно пробуем отправить в Telegram сообщение о сбое отправки
+            send_to_telegram("⚠️ Не удалось опубликовать сгенерированный пост (ошибка отправки).", is_error=True)
     else:
-        print(f"[PUBLISH_FAIL] Content generation failed: {content}")
+        # Генерация не удалась – отправляем ошибку в Telegram
+        error_message = f"❌ *Ошибка генерации поста*\n\n{content}"
+        print(f"[PUBLISH_FAIL] Генерация не удалась: {content}")
+        # Отправляем ошибку в канал
+        if send_to_telegram(error_message, is_error=True):
+            print("[PUBLISH_FAIL] Сообщение об ошибке доставлено в Telegram.")
+        else:
+            print("[PUBLISH_FAIL] Не удалось даже отправить сообщение об ошибке.")
