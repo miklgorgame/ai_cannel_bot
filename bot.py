@@ -10,15 +10,16 @@ from huggingface_hub import InferenceClient
 # --- КОНФИГУРАЦИЯ ---
 HF_API_TOKEN = os.getenv("HF_API_TOKEN")
 TG_BOT_TOKEN = os.getenv("TG_BOT_TOKEN")
-TG_CHANNEL_ID = os.getenv("TG_CHAT_ID")
-CREATOR_ID = int(os.getenv("CREATOR_ID", "0"))
+TG_CHANNEL_ID = os.getenv("TG_CHAT_ID")          # ID канала
+CREATOR_ID = int(os.getenv("CREATOR_ID", "0"))   # Ваш Telegram ID
 
-# Режим тестирования (устанавливается через переменную окружения)
+# Режим тестирования: при ручном запуске workflow или local TEST_MODE=true
 TEST_MODE = os.getenv("TEST_MODE", "false").lower() == "true"
 
 DB_FILE = "bot_memory.db"
-IZHEVSK_TZ = ZoneInfo("Europe/Samara")
+IZHEVSK_TZ = ZoneInfo("Europe/Samara")           # Ижевск UTC+4
 
+# --- СИСТЕМНЫЙ ПРОМПТ ДЛЯ ГЕНЕРАЦИИ ПОСТА ---
 SYSTEM_PROMPT = """
 Ты — опытный Python-разработчик и автор IT-канала.
 Твоя задача: на основе предоставленных новостей написать пост для Telegram.
@@ -30,7 +31,7 @@ SYSTEM_PROMPT = """
 - В конце добавь ссылки на источники.
 """
 
-# --- БАЗА ДАННЫХ ---
+# --- БАЗА ДАННЫХ (SQLite) ---
 def init_db():
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
@@ -106,42 +107,76 @@ def clean_old_news(days: int = 7):
     conn.commit()
     conn.close()
 
-# --- НОВОСТИ ---
+def get_recent_posts(limit: int = 10):
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    c.execute("SELECT id, message_id, content, created_at FROM posts ORDER BY created_at DESC LIMIT ?", (limit,))
+    rows = c.fetchall()
+    conn.close()
+    return [{"id": r[0], "message_id": r[1], "content": r[2][:100], "created_at": r[3]} for r in rows]
+
+# --- ПОЛУЧЕНИЕ НОВОСТЕЙ ИЗ НЕСКОЛЬКИХ ИСТОЧНИКОВ ---
 def fetch_fresh_news(limit: int = 5):
-    print("📰 Запрашиваю свежие новости с Хабра...")
-    rss_url = 'https://habr.com/ru/rss/best/daily/?fl=ru'
+    """Получает новости из нескольких RSS-лент, избегая повторной публикации."""
+    print("📰 Запрашиваю свежие новости из нескольких источников...")
+
+    # Список источников (можно легко добавлять/удалять)
+    news_sources = [
+        {"name": "Habr", "url": "https://habr.com/ru/rss/feed/posts/?fl=ru"},
+        {"name": "3DNews", "url": "https://3dnews.ru/news/all/"},
+        {"name": "CNews", "url": "https://www.cnews.ru/rss/news/"},
+        {"name": "iXBT", "url": "https://www.ixbt.com/news.rss"},
+        {"name": "Ferra", "url": "https://ferra.ru/rss/news/"},
+        {"name": "SecurityLab", "url": "https://www.securitylab.ru/export/rss/"},
+        {"name": "vc.ru", "url": "https://vc.ru/rss/"},
+        {"name": "Kod", "url": "https://kod.ru/rss/"},
+        {"name": "Overclockers", "url": "https://overclockers.ru/rss/news.rss"},
+    ]
+
     news_list = []
-    try:
-        feed = feedparser.parse(rss_url)
-        for entry in feed.entries[:limit*2]:
-            link = entry.get('link', '')
-            if not link or is_news_already_published(link):
-                continue
-            title = entry.get('title', 'Без заголовка')
-            summary = entry.get('summary', '')
-            summary = re.sub('<[^<]+?>', '', summary)
-            if len(summary) > 500:
-                summary = summary[:500] + '...'
-            news_list.append({
-                'title': title,
-                'link': link,
-                'summary': summary
-            })
+    for source in news_sources:
+        try:
+            print(f"    - Загружаю новости из {source['name']}...")
+            feed = feedparser.parse(source['url'])
+            for entry in feed.entries[:limit]:
+                link = entry.get('link', '')
+                if not link or is_news_already_published(link):
+                    continue
+                title = entry.get('title', 'Без заголовка')
+                summary = entry.get('summary', '')
+                summary = re.sub('<[^<]+?>', '', summary)
+                if len(summary) > 500:
+                    summary = summary[:500] + '...'
+                news_list.append({
+                    'source': source['name'],
+                    'title': title,
+                    'link': link,
+                    'summary': summary
+                })
+                if len(news_list) >= limit:
+                    break
             if len(news_list) >= limit:
                 break
-    except Exception as e:
-        print(f"⚠️ Ошибка при парсинге RSS: {e}")
-        return []
-    return news_list
+        except Exception as e:
+            print(f"    ⚠️ Ошибка при парсинге RSS {source['name']}: {e}")
+            continue
 
-# --- ГЕНЕРАЦИЯ ПОСТА ---
+    if not news_list:
+        print("⚠️ Не удалось загрузить новости из доступных источников.")
+        return []
+
+    # Возвращаем только первые `limit` новостей
+    return news_list[:limit]
+
+# --- ГЕНЕРАЦИЯ ПОСТА ЧЕРЕЗ Hugging Face ---
 def generate_post(news_list):
     print("🤖 Генерирую пост...")
     if not HF_API_TOKEN:
         return "❌ Ошибка: Не указан токен Hugging Face."
 
+    # Формируем контекст с указанием источника
     news_context = "\n\n".join([
-        f"НОВОСТЬ {i+1}:\nЗАГОЛОВОК: {n['title']}\nОПИСАНИЕ: {n['summary']}\nССЫЛКА: {n['link']}"
+        f"ИСТОЧНИК: {n['source']}\nЗАГОЛОВОК: {n['title']}\nОПИСАНИЕ: {n['summary']}\nССЫЛКА: {n['link']}"
         for i, n in enumerate(news_list)
     ])
 
@@ -160,7 +195,7 @@ def generate_post(news_list):
         print(f"❌ Ошибка генерации: {e}")
         return f"❌ Ошибка: {str(e)}"
 
-# --- ОТВЕТЫ НА КОММЕНТАРИИ ---
+# --- ОТВЕТЫ НА КОММЕНТАРИИ (не шаблонные) ---
 def generate_reply(comment_text: str, post_content: str) -> str:
     prompt = f"""
 Ты — автор IT-канала. Подписчик оставил комментарий к твоему посту.
@@ -186,6 +221,7 @@ def generate_reply(comment_text: str, post_content: str) -> str:
         return None
 
 def check_and_reply_to_comments():
+    """Проверяет комментарии к последнему посту и отвечает на новые (один раз)."""
     print("💬 Проверяю комментарии к последнему посту...")
     last_post = get_last_post()
     if not last_post:
@@ -213,7 +249,6 @@ def check_and_reply_to_comments():
                 continue
 
             comment_text = message.get("text", "")
-            user_id = message.get("from", {}).get("id")
             username = message.get("from", {}).get("username", "подписчик")
             if not comment_text:
                 continue
@@ -235,11 +270,11 @@ def check_and_reply_to_comments():
                     print(f"❌ Ошибка отправки ответа: {reply_resp.text}")
             else:
                 print(f"⚠️ Не удалось сгенерировать ответ на комментарий {comment_id}")
-                mark_comment_processed(comment_id, last_post['id'])
+                mark_comment_processed(comment_id, last_post['id'])  # чтобы не пытаться снова
     except Exception as e:
         print(f"❌ Ошибка при проверке комментариев: {e}")
 
-# --- ПРОВЕРКА СООБЩЕНИЙ ОТ СОЗДАТЕЛЯ ---
+# --- ПРОВЕРКА ЛИЧНЫХ СООБЩЕНИЙ ОТ СОЗДАТЕЛЯ ---
 def check_creator_messages():
     print("👤 Проверяю личные сообщения от создателя...")
     url = f"https://api.telegram.org/bot{TG_BOT_TOKEN}/getUpdates"
@@ -266,6 +301,7 @@ def check_creator_messages():
                     send_telegram_message(CREATOR_ID, stats)
                 else:
                     send_telegram_message(CREATOR_ID, f"✅ Сообщение получено: '{text}'\nДоступные команды: /generate, /stats")
+                # После обработки можно удалить апдейт, используя offset, но для простоты пропускаем
     except Exception as e:
         print(f"❌ Ошибка при проверке сообщений создателя: {e}")
 
@@ -280,14 +316,7 @@ def send_telegram_message(chat_id: int, text: str):
     except Exception as e:
         print(f"❌ Исключение: {e}")
 
-def get_recent_posts(limit: int = 10):
-    conn = sqlite3.connect(DB_FILE)
-    c = conn.cursor()
-    c.execute("SELECT id, message_id, content, created_at FROM posts ORDER BY created_at DESC LIMIT ?", (limit,))
-    rows = c.fetchall()
-    conn.close()
-    return [{"id": r[0], "message_id": r[1], "content": r[2][:100], "created_at": r[3]} for r in rows]
-
+# --- ПУБЛИКАЦИЯ НОВОГО ПОСТА ---
 def publish_new_post():
     print("📝 Начинаю публикацию нового поста...")
     news_list = fetch_fresh_news(limit=5)
