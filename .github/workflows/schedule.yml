@@ -2,7 +2,7 @@ name: Auto Post to Telegram Channel
 
 on:
   schedule:
-    - cron: '0 * * * *'          # Каждый час
+    - cron: '0 * * * *'          # Каждый час (для проверки комментариев)
   workflow_dispatch:
     inputs:
       test_mode:
@@ -51,6 +51,7 @@ jobs:
           HF_API_TOKEN: ${{ secrets.HF_API_TOKEN }}
           TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
           TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
+          TG_GROUP_ID: ${{ secrets.TG_GROUP_ID }}
           CREATOR_ID: ${{ secrets.CREATOR_ID }}
           TEST_MODE: ${{ github.event.inputs.test_mode || 'false' }}
         run: python bot.py
