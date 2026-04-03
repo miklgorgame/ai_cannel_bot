@@ -10,17 +10,20 @@ from huggingface_hub import InferenceClient
 # --- КОНФИГУРАЦИЯ ---
 HF_API_TOKEN = os.getenv("HF_API_TOKEN")
 TG_BOT_TOKEN = os.getenv("TG_BOT_TOKEN")
-TG_CHANNEL_ID = os.getenv("TG_CHAT_ID")          # ID канала (например, -1001234567890)
-CREATOR_ID = int(os.getenv("CREATOR_ID", "0"))   # Ваш Telegram ID
+TG_CHANNEL_ID = os.getenv("TG_CHAT_ID")          # ID канала для постов (начинается с -100)
+TG_GROUP_ID = os.getenv("TG_GROUP_ID")           # ID группы для комментариев (если отличается)
+CREATOR_ID = int(os.getenv("CREATOR_ID", "0"))
 
-# Режим тестирования: при ручном запуске workflow или local TEST_MODE=true
 TEST_MODE = os.getenv("TEST_MODE", "false").lower() == "true"
 
 DB_FILE = "bot_memory.db"
 OFFSET_FILE = "last_update_id.txt"
-IZHEVSK_TZ = ZoneInfo("Europe/Samara")           # Ижевск UTC+4
+IZHEVSK_TZ = ZoneInfo("Europe/Samara")
 
-# --- СИСТЕМНЫЙ ПРОМПТ ДЛЯ ГЕНЕРАЦИИ ПОСТА ---
+# Если TG_GROUP_ID не задан, используем TG_CHANNEL_ID (но тогда комментарии не будут работать, если нет группы обсуждения)
+COMMENTS_CHAT_ID = TG_GROUP_ID if TG_GROUP_ID else TG_CHANNEL_ID
+
+# --- СИСТЕМНЫЙ ПРОМПТ ---
 SYSTEM_PROMPT = """
 Ты — опытный Python-разработчик и автор IT-канала.
 Твоя задача: на основе предоставленных новостей написать пост для Telegram.
@@ -116,7 +119,7 @@ def get_recent_posts(limit: int = 10):
     conn.close()
     return [{"id": r[0], "message_id": r[1], "content": r[2][:100], "created_at": r[3]} for r in rows]
 
-# --- РАБОТА С OFFSET ДЛЯ getUpdates ---
+# --- OFFSET ---
 def get_last_offset():
     if os.path.exists(OFFSET_FILE):
         with open(OFFSET_FILE, "r") as f:
@@ -127,11 +130,9 @@ def save_last_offset(offset):
     with open(OFFSET_FILE, "w") as f:
         f.write(str(offset))
 
-# --- ПОЛУЧЕНИЕ НОВОСТЕЙ ИЗ НЕСКОЛЬКИХ ИСТОЧНИКОВ ---
+# --- НОВОСТИ ---
 def fetch_fresh_news(limit: int = 5):
-    """Получает новости из нескольких RSS-лент, избегая повторной публикации."""
     print("📰 Запрашиваю свежие новости из нескольких источников...")
-
     news_sources = [
         {"name": "Habr", "url": "https://habr.com/ru/rss/feed/posts/?fl=ru"},
         {"name": "3DNews", "url": "https://3dnews.ru/news/all/"},
@@ -143,7 +144,6 @@ def fetch_fresh_news(limit: int = 5):
         {"name": "Kod", "url": "https://kod.ru/rss/"},
         {"name": "Overclockers", "url": "https://overclockers.ru/rss/news.rss"},
     ]
-
     news_list = []
     for source in news_sources:
         try:
@@ -171,26 +171,17 @@ def fetch_fresh_news(limit: int = 5):
         except Exception as e:
             print(f"    ⚠️ Ошибка при парсинге RSS {source['name']}: {e}")
             continue
-
-    if not news_list:
-        print("⚠️ Не удалось загрузить новости из доступных источников.")
-        return []
-
     return news_list[:limit]
 
-# --- ГЕНЕРАЦИЯ ПОСТА ЧЕРЕЗ Hugging Face ---
 def generate_post(news_list):
     print("🤖 Генерирую пост...")
     if not HF_API_TOKEN:
         return "❌ Ошибка: Не указан токен Hugging Face."
-
     news_context = "\n\n".join([
         f"ИСТОЧНИК: {n['source']}\nЗАГОЛОВОК: {n['title']}\nОПИСАНИЕ: {n['summary']}\nССЫЛКА: {n['link']}"
-        for i, n in enumerate(news_list)
+        for n in news_list
     ])
-
     full_prompt = f"{SYSTEM_PROMPT}\n\nВот свежие новости:\n\n{news_context}"
-
     try:
         client = InferenceClient(api_key=HF_API_TOKEN, provider="auto")
         completion = client.chat.completions.create(
@@ -204,7 +195,6 @@ def generate_post(news_list):
         print(f"❌ Ошибка генерации: {e}")
         return f"❌ Ошибка: {str(e)}"
 
-# --- ОТВЕТЫ НА КОММЕНТАРИИ ---
 def generate_reply(comment_text: str, post_content: str) -> str:
     prompt = f"""
 Ты — автор IT-канала. Подписчик оставил комментарий к твоему посту.
@@ -230,8 +220,7 @@ def generate_reply(comment_text: str, post_content: str) -> str:
         return None
 
 def check_and_reply_to_comments():
-    """Проверяет комментарии к последнему посту и отвечает на новые."""
-    print("💬 Проверяю комментарии к последнему посту...")
+    print("💬 Проверяю комментарии в группе обсуждения...")
     last_post = get_last_post()
     if not last_post:
         print("Нет постов для проверки комментариев.")
@@ -240,7 +229,7 @@ def check_and_reply_to_comments():
     post_message_id = last_post['message_id']
     offset = get_last_offset()
     url = f"https://api.telegram.org/bot{TG_BOT_TOKEN}/getUpdates"
-    params = {"offset": offset, "timeout": 30}
+    params = {"offset": offset, "timeout": 30, "allowed_updates": ["message"]}
     try:
         resp = requests.get(url, params=params, timeout=35)
         data = resp.json()
@@ -257,9 +246,21 @@ def check_and_reply_to_comments():
             message = update.get("message")
             if not message:
                 continue
-            reply_to = message.get("reply_to_message")
-            if not reply_to or reply_to.get("message_id") != post_message_id:
+
+            # Проверяем, что сообщение пришло из группы комментариев (если группа задана)
+            chat_id = message.get("chat", {}).get("id")
+            if COMMENTS_CHAT_ID and str(chat_id) != str(COMMENTS_CHAT_ID):
                 continue
+
+            reply_to = message.get("reply_to_message")
+            if not reply_to:
+                continue
+            # В группе обсуждения reply_to_message может ссылаться на исходный пост в канале
+            # Или на сообщение бота в группе. Проверяем, что ссылается на наш пост.
+            if reply_to.get("message_id") != post_message_id:
+                # Если в группе есть другой бот или пересылка, игнорируем
+                continue
+
             comment_id = message.get("message_id")
             if is_comment_processed(comment_id):
                 continue
@@ -274,7 +275,7 @@ def check_and_reply_to_comments():
             if reply_text:
                 reply_url = f"https://api.telegram.org/bot{TG_BOT_TOKEN}/sendMessage"
                 reply_payload = {
-                    "chat_id": TG_CHANNEL_ID,
+                    "chat_id": chat_id,  # отвечаем в ту же группу
                     "text": reply_text,
                     "reply_to_message_id": comment_id
                 }
@@ -286,7 +287,6 @@ def check_and_reply_to_comments():
                     print(f"❌ Ошибка отправки ответа: {reply_resp.text}")
             else:
                 print(f"⚠️ Не удалось сгенерировать ответ на комментарий {comment_id}")
-                # Всё равно помечаем как обработанный, чтобы не спамить
                 mark_comment_processed(comment_id, last_post['id'])
 
         if max_update_id >= offset:
@@ -294,11 +294,8 @@ def check_and_reply_to_comments():
     except Exception as e:
         print(f"❌ Ошибка при проверке комментариев: {e}")
 
-# --- ПРОВЕРКА ЛИЧНЫХ СООБЩЕНИЙ ОТ СОЗДАТЕЛЯ ---
 def check_creator_messages():
     print("👤 Проверяю личные сообщения от создателя...")
-    # Для личных сообщений используем тот же offset, что и для комментариев,
-    # чтобы не пропустить команды. Но можно отдельный offset.
     offset = get_last_offset()
     url = f"https://api.telegram.org/bot{TG_BOT_TOKEN}/getUpdates"
     params = {"offset": offset, "timeout": 30}
@@ -307,13 +304,11 @@ def check_creator_messages():
         data = resp.json()
         if not data.get("ok"):
             return
-
         max_update_id = offset - 1
         for update in data.get("result", []):
             update_id = update.get("update_id")
             if update_id > max_update_id:
                 max_update_id = update_id
-
             message = update.get("message")
             if not message:
                 continue
@@ -322,7 +317,6 @@ def check_creator_messages():
             if user_id == CREATOR_ID and text:
                 print(f"📨 Сообщение от создателя: {text}")
                 if text.startswith("/generate"):
-                    print("🔄 Принудительная публикация поста по команде создателя")
                     publish_new_post()
                 elif text.startswith("/stats"):
                     posts = get_recent_posts(10)
@@ -346,7 +340,6 @@ def send_telegram_message(chat_id: int, text: str):
     except Exception as e:
         print(f"❌ Исключение: {e}")
 
-# --- ПУБЛИКАЦИЯ НОВОГО ПОСТА ---
 def publish_new_post():
     print("📝 Начинаю публикацию нового поста...")
     news_list = fetch_fresh_news(limit=5)
@@ -379,13 +372,11 @@ def publish_new_post():
         print(f"❌ Не удалось сгенерировать пост: {post_content}")
         send_telegram_message(CREATOR_ID, f"❌ Не удалось сгенерировать пост: {post_content}")
 
-# --- ОСНОВНАЯ ЛОГИКА ---
 def main():
     print("🚀 Запуск бота...")
     init_db()
     clean_old_news(days=7)
 
-    # Если тестовый режим – публикуем пост и отвечаем на комментарии
     if TEST_MODE:
         print("🧪 ТЕСТОВЫЙ РЕЖИМ: публикую пост и отвечаю на комментарии")
         publish_new_post()
@@ -393,7 +384,6 @@ def main():
         check_creator_messages()
         return
 
-    # Обычный режим по расписанию
     now_izhevsk = datetime.now(IZHEVSK_TZ)
     current_hour = now_izhevsk.hour
     print(f"🕐 Текущее время по Ижевску: {now_izhevsk.strftime('%Y-%m-%d %H:%M:%S')}")
