@@ -2,18 +2,19 @@ name: Auto Post to Telegram Channel
 
 on:
   schedule:
-    - cron: '0 8 * * *'  # Запуск каждый день в 8:00 UTC (12:00 по Ижевску)
-  workflow_dispatch:     # Ручной запуск
+    - cron: '0 * * * *'          # Каждый час
+  workflow_dispatch:
+    inputs:
+      test_mode:
+        description: 'Тестовый режим (сразу публикует пост и отвечает на комменты)'
+        required: false
+        default: false
+        type: boolean
 
 jobs:
   post-job:
     runs-on: ubuntu-latest
     steps:
-      - name: Set timezone to Europe/Samara
-        uses: szenius/set-timezone@v2.0
-        with:
-          timezoneLinux: "Europe/Samara"
-
       - name: Checkout Code
         uses: actions/checkout@v4
 
@@ -43,10 +44,13 @@ jobs:
           pip install requests
           pip install huggingface_hub
           pip install feedparser
+          pip install tzdata
 
       - name: Run Bot
         env:
           HF_API_TOKEN: ${{ secrets.HF_API_TOKEN }}
           TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
           TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
+          CREATOR_ID: ${{ secrets.CREATOR_ID }}
+          TEST_MODE: ${{ github.event.inputs.test_mode || 'false' }}
         run: python bot.py
