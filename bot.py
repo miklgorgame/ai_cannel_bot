@@ -10,13 +10,14 @@ from huggingface_hub import InferenceClient
 # --- КОНФИГУРАЦИЯ ---
 HF_API_TOKEN = os.getenv("HF_API_TOKEN")
 TG_BOT_TOKEN = os.getenv("TG_BOT_TOKEN")
-TG_CHANNEL_ID = os.getenv("TG_CHAT_ID")          # ID канала
+TG_CHANNEL_ID = os.getenv("TG_CHAT_ID")          # ID канала (например, -1001234567890)
 CREATOR_ID = int(os.getenv("CREATOR_ID", "0"))   # Ваш Telegram ID
 
 # Режим тестирования: при ручном запуске workflow или local TEST_MODE=true
 TEST_MODE = os.getenv("TEST_MODE", "false").lower() == "true"
 
 DB_FILE = "bot_memory.db"
+OFFSET_FILE = "last_update_id.txt"
 IZHEVSK_TZ = ZoneInfo("Europe/Samara")           # Ижевск UTC+4
 
 # --- СИСТЕМНЫЙ ПРОМПТ ДЛЯ ГЕНЕРАЦИИ ПОСТА ---
@@ -115,12 +116,22 @@ def get_recent_posts(limit: int = 10):
     conn.close()
     return [{"id": r[0], "message_id": r[1], "content": r[2][:100], "created_at": r[3]} for r in rows]
 
+# --- РАБОТА С OFFSET ДЛЯ getUpdates ---
+def get_last_offset():
+    if os.path.exists(OFFSET_FILE):
+        with open(OFFSET_FILE, "r") as f:
+            return int(f.read().strip())
+    return 0
+
+def save_last_offset(offset):
+    with open(OFFSET_FILE, "w") as f:
+        f.write(str(offset))
+
 # --- ПОЛУЧЕНИЕ НОВОСТЕЙ ИЗ НЕСКОЛЬКИХ ИСТОЧНИКОВ ---
 def fetch_fresh_news(limit: int = 5):
     """Получает новости из нескольких RSS-лент, избегая повторной публикации."""
     print("📰 Запрашиваю свежие новости из нескольких источников...")
 
-    # Список источников (можно легко добавлять/удалять)
     news_sources = [
         {"name": "Habr", "url": "https://habr.com/ru/rss/feed/posts/?fl=ru"},
         {"name": "3DNews", "url": "https://3dnews.ru/news/all/"},
@@ -165,7 +176,6 @@ def fetch_fresh_news(limit: int = 5):
         print("⚠️ Не удалось загрузить новости из доступных источников.")
         return []
 
-    # Возвращаем только первые `limit` новостей
     return news_list[:limit]
 
 # --- ГЕНЕРАЦИЯ ПОСТА ЧЕРЕЗ Hugging Face ---
@@ -174,7 +184,6 @@ def generate_post(news_list):
     if not HF_API_TOKEN:
         return "❌ Ошибка: Не указан токен Hugging Face."
 
-    # Формируем контекст с указанием источника
     news_context = "\n\n".join([
         f"ИСТОЧНИК: {n['source']}\nЗАГОЛОВОК: {n['title']}\nОПИСАНИЕ: {n['summary']}\nССЫЛКА: {n['link']}"
         for i, n in enumerate(news_list)
@@ -195,7 +204,7 @@ def generate_post(news_list):
         print(f"❌ Ошибка генерации: {e}")
         return f"❌ Ошибка: {str(e)}"
 
-# --- ОТВЕТЫ НА КОММЕНТАРИИ (не шаблонные) ---
+# --- ОТВЕТЫ НА КОММЕНТАРИИ ---
 def generate_reply(comment_text: str, post_content: str) -> str:
     prompt = f"""
 Ты — автор IT-канала. Подписчик оставил комментарий к твоему посту.
@@ -221,7 +230,7 @@ def generate_reply(comment_text: str, post_content: str) -> str:
         return None
 
 def check_and_reply_to_comments():
-    """Проверяет комментарии к последнему посту и отвечает на новые (один раз)."""
+    """Проверяет комментарии к последнему посту и отвечает на новые."""
     print("💬 Проверяю комментарии к последнему посту...")
     last_post = get_last_post()
     if not last_post:
@@ -229,15 +238,22 @@ def check_and_reply_to_comments():
         return
 
     post_message_id = last_post['message_id']
+    offset = get_last_offset()
     url = f"https://api.telegram.org/bot{TG_BOT_TOKEN}/getUpdates"
+    params = {"offset": offset, "timeout": 30}
     try:
-        resp = requests.get(url, timeout=30)
+        resp = requests.get(url, params=params, timeout=35)
         data = resp.json()
         if not data.get("ok"):
             print(f"Ошибка getUpdates: {data}")
             return
 
+        max_update_id = offset - 1
         for update in data.get("result", []):
+            update_id = update.get("update_id")
+            if update_id > max_update_id:
+                max_update_id = update_id
+
             message = update.get("message")
             if not message:
                 continue
@@ -270,21 +286,34 @@ def check_and_reply_to_comments():
                     print(f"❌ Ошибка отправки ответа: {reply_resp.text}")
             else:
                 print(f"⚠️ Не удалось сгенерировать ответ на комментарий {comment_id}")
-                mark_comment_processed(comment_id, last_post['id'])  # чтобы не пытаться снова
+                # Всё равно помечаем как обработанный, чтобы не спамить
+                mark_comment_processed(comment_id, last_post['id'])
+
+        if max_update_id >= offset:
+            save_last_offset(max_update_id + 1)
     except Exception as e:
         print(f"❌ Ошибка при проверке комментариев: {e}")
 
 # --- ПРОВЕРКА ЛИЧНЫХ СООБЩЕНИЙ ОТ СОЗДАТЕЛЯ ---
 def check_creator_messages():
     print("👤 Проверяю личные сообщения от создателя...")
+    # Для личных сообщений используем тот же offset, что и для комментариев,
+    # чтобы не пропустить команды. Но можно отдельный offset.
+    offset = get_last_offset()
     url = f"https://api.telegram.org/bot{TG_BOT_TOKEN}/getUpdates"
+    params = {"offset": offset, "timeout": 30}
     try:
-        resp = requests.get(url, timeout=30)
+        resp = requests.get(url, params=params, timeout=35)
         data = resp.json()
         if not data.get("ok"):
             return
 
+        max_update_id = offset - 1
         for update in data.get("result", []):
+            update_id = update.get("update_id")
+            if update_id > max_update_id:
+                max_update_id = update_id
+
             message = update.get("message")
             if not message:
                 continue
@@ -301,7 +330,8 @@ def check_creator_messages():
                     send_telegram_message(CREATOR_ID, stats)
                 else:
                     send_telegram_message(CREATOR_ID, f"✅ Сообщение получено: '{text}'\nДоступные команды: /generate, /stats")
-                # После обработки можно удалить апдейт, используя offset, но для простоты пропускаем
+        if max_update_id >= offset:
+            save_last_offset(max_update_id + 1)
     except Exception as e:
         print(f"❌ Ошибка при проверке сообщений создателя: {e}")
 
@@ -355,7 +385,7 @@ def main():
     init_db()
     clean_old_news(days=7)
 
-    # Если тестовый режим (ручной запуск или TEST_MODE=true) – делаем всё: публикуем пост и отвечаем на комментарии
+    # Если тестовый режим – публикуем пост и отвечаем на комментарии
     if TEST_MODE:
         print("🧪 ТЕСТОВЫЙ РЕЖИМ: публикую пост и отвечаю на комментарии")
         publish_new_post()
