@@ -11,29 +11,24 @@ from huggingface_hub import InferenceClient
 # ===================== КОНФИГУРАЦИЯ =====================
 HF_API_TOKEN = os.getenv("HF_API_TOKEN")
 TG_BOT_TOKEN = os.getenv("TG_BOT_TOKEN")
-TG_CHANNEL_ID = os.getenv("TG_CHAT_ID")          # ID канала
-TG_GROUP_ID = os.getenv("TG_GROUP_ID")           # ID группы для комментариев
+TG_CHANNEL_ID = os.getenv("TG_CHAT_ID")
+TG_GROUP_ID = os.getenv("TG_GROUP_ID")
 CREATOR_ID = int(os.getenv("CREATOR_ID", "0"))
+
+# !!! ОБЯЗАТЕЛЬНО ДОБАВЬТЕ ЭТУ ПЕРЕМЕННУЮ В GitHub Secrets !!!
+PEXELS_API_KEY = os.getenv("PEXELS_API_KEY")
 
 TEST_MODE = os.getenv("TEST_MODE", "false").lower() == "true"
 
 DB_FILE = "bot_memory.db"
 OFFSET_FILE = "last_update_id.txt"
-IZHEVSK_TZ = ZoneInfo("Europe/Samara")           # Ижевск UTC+4
-
+IZHEVSK_TZ = ZoneInfo("Europe/Samara")
 COMMENTS_CHAT_ID = TG_GROUP_ID if TG_GROUP_ID else TG_CHANNEL_ID
 
 # Приоритет источников (чем меньше число, тем выше приоритет)
 SOURCE_PRIORITY = {
-    "Habr": 1,
-    "iXBT": 2,
-    "3DNews": 3,
-    "SecurityLab": 4,
-    "vc.ru": 5,
-    "Kod": 6,
-    "CNews": 7,
-    "Ferra": 8,
-    "Overclockers": 9,
+    "Habr": 1, "iXBT": 2, "3DNews": 3, "SecurityLab": 4,
+    "vc.ru": 5, "Kod": 6, "CNews": 7, "Ferra": 8, "Overclockers": 9,
 }
 
 # Ключевые слова для повышения приоритета
@@ -44,11 +39,8 @@ KEYWORDS = [
 ]
 
 GREETINGS = [
-    "Привет, друзья! 👋",
-    "Здравствуйте, уважаемые подписчики! 💻",
-    "Всем привет! 🤗",
-    "Доброго времени суток! 🌞",
-    "Приветствую, IT-энтузиасты! 🚀"
+    "Привет, друзья! 👋", "Здравствуйте, уважаемые подписчики! 💻",
+    "Всем привет! 🤗", "Доброго времени суток! 🌞", "Приветствую, IT-энтузиасты! 🚀"
 ]
 
 CLOSINGS = [
@@ -75,14 +67,18 @@ SYSTEM_PROMPT = """
 - В конце поста добавь ссылки на источники.
 """
 
-# --- СПИСОК МОДЕЛЕЙ ДЛЯ FALLBACK (в порядке приоритета) ---
-# Здесь перечислены модели, которые будут использоваться, если основная недоступна
+# --- СПИСОК МОДЕЛЕЙ ДЛЯ FALLBACK (ГЕНЕРАЦИЯ ТЕКСТА) ---
 FALLBACK_MODELS = [
-    "deepseek-ai/DeepSeek-V3",          # Основная мощная модель
-    "Qwen/Qwen2.5-7B-Instruct",         # Хорошая альтернатива с поддержкой русского
-    "meta-llama/Llama-3.1-8B-Instruct", # Популярная модель от Meta
-    "IlyaGusev/saiga_llama3_8b",        # Специализированная русскоязычная модель
-    "mistralai/Mistral-7B-Instruct-v0.3" # Ещё один надёжный вариант
+    "deepseek-ai/DeepSeek-V3", "Qwen/Qwen2.5-7B-Instruct", 
+    "meta-llama/Llama-3.1-8B-Instruct", "IlyaGusev/saiga_llama3_8b",
+    "mistralai/Mistral-7B-Instruct-v0.3"
+]
+
+# --- СПИСОК МОДЕЛЕЙ ДЛЯ ГЕНЕРАЦИИ ИЗОБРАЖЕНИЙ (РЕЗЕРВ) ---
+IMAGE_MODELS = [
+    "black-forest-labs/FLUX.1-dev",
+    "stabilityai/stable-diffusion-2-1",
+    "CompVis/stable-diffusion-v1-4",
 ]
 
 # ===================== БАЗА ДАННЫХ =====================
@@ -182,7 +178,6 @@ def save_last_offset(offset):
 
 # ===================== НОВОСТИ С ПРИОРИТЕТАМИ =====================
 def calculate_priority(news_item):
-    """Чем меньше число, тем выше приоритет."""
     source = news_item.get('source', '')
     source_priority = SOURCE_PRIORITY.get(source, 10)
     text = (news_item['title'] + ' ' + news_item['summary']).lower()
@@ -193,10 +188,6 @@ def calculate_priority(news_item):
     return source_priority + keyword_boost
 
 def fetch_fresh_news(limit: int = 5):
-    """
-    Собирает новости из RSS, избегает уже опубликованных,
-    сортирует по приоритету, но гарантирует возврат ровно `limit` новостей.
-    """
     print("📰 Запрашиваю свежие новости из нескольких источников...")
     news_sources = [
         {"name": "Habr", "url": "https://habr.com/ru/rss/feed/posts/?fl=ru"},
@@ -238,13 +229,107 @@ def fetch_fresh_news(limit: int = 5):
         print("⚠️ Не удалось загрузить новости из доступных источников.")
         return []
 
-    # Сортируем все кандидаты по приоритету
     all_candidates.sort(key=calculate_priority)
-
-    # Берём первые `limit` из отсортированного списка
     top_news = all_candidates[:limit]
     print(f"✅ Отобрано {len(top_news)} новостей для публикации.")
     return top_news
+
+# ===================== ПОИСК ИЗОБРАЖЕНИЙ НА PEXELS =====================
+def search_pexels_image(query: str) -> bytes | None:
+    """Ищет изображение на Pexels по ключевым словам. Возвращает байты или None."""
+    if not PEXELS_API_KEY:
+        print("⚠️ API-ключ Pexels не задан. Поиск изображений недоступен.")
+        return None
+
+    print(f"🔍 Ищу изображение на Pexels по запросу: {query}")
+    # Формируем краткий и чёткий поисковый запрос
+    search_query = ' '.join(query.split()[:5])
+    
+    url = "https://api.pexels.com/v1/search"
+    headers = {"Authorization": PEXELS_API_KEY}
+    params = {"query": search_query, "per_page": 5, "orientation": "landscape"}
+
+    try:
+        response = requests.get(url, headers=headers, params=params, timeout=15)
+        if response.status_code == 200:
+            data = response.json()
+            photos = data.get("photos", [])
+            if photos:
+                # Берём первую подходящую фотографию
+                photo_url = photos[0]["src"]["large"]
+                print(f"✅ Изображение найдено на Pexels. Скачиваю...")
+                img_response = requests.get(photo_url, timeout=30)
+                if img_response.status_code == 200:
+                    return img_response.content
+                else:
+                    print(f"⚠️ Не удалось скачать изображение: {img_response.status_code}")
+            else:
+                print("⚠️ По запросу ничего не найдено на Pexels.")
+        else:
+            print(f"⚠️ Ошибка Pexels API: {response.status_code}")
+    except Exception as e:
+        print(f"⚠️ Ошибка при поиске на Pexels: {e}")
+    return None
+
+# ===================== ГЕНЕРАЦИЯ ИЗОБРАЖЕНИЯ ЧЕРЕЗ AI (РЕЗЕРВ) =====================
+def generate_image(prompt: str) -> bytes | None:
+    print("🎨 Начинаю резервную генерацию изображения через AI...")
+    if not HF_API_TOKEN:
+        print("❌ Нет токена HF для генерации изображения")
+        return None
+
+    enhanced_prompt = f"Create a realistic and engaging cover image for a news article. The image should be high quality and thematically match the text: {prompt}. Do not include any text or letters in the image."
+    headers = {"Authorization": f"Bearer {HF_API_TOKEN}"}
+    
+    for model_id in IMAGE_MODELS:
+        try:
+            print(f"🔄 Пробую модель для изображения: {model_id}")
+            payload = {"inputs": enhanced_prompt}
+            API_URL = f"https://api-inference.huggingface.co/models/{model_id}"
+            response = requests.post(API_URL, headers=headers, json=payload, timeout=60)
+            if response.status_code == 200:
+                print(f"✅ Изображение успешно сгенерировано с помощью {model_id}")
+                return response.content
+            else:
+                print(f"⚠️ Модель {model_id} вернула ошибку {response.status_code}, пробую следующую...")
+        except Exception as e:
+            print(f"⚠️ Ошибка с моделью {model_id}: {str(e)[:100]}, пробую следующую...")
+            continue
+    print("❌ Не удалось сгенерировать изображение ни одной из моделей.")
+    return None
+
+# ===================== ОТПРАВКА В TELEGRAM (ОДНО СООБЩЕНИЕ) =====================
+def send_telegram_photo(chat_id: int, photo_bytes: bytes, caption: str) -> bool:
+    """Отправляет фото с подписью в Telegram (одним сообщением)."""
+    url = f"https://api.telegram.org/bot{TG_BOT_TOKEN}/sendPhoto"
+    files = {"photo": ("image.png", photo_bytes, "image/png")}
+    data = {"chat_id": chat_id, "caption": caption, "parse_mode": "HTML"}
+    try:
+        resp = requests.post(url, files=files, data=data, timeout=30)
+        if resp.status_code == 200:
+            print(f"✅ Фото с подписью отправлено в чат {chat_id}")
+            return True
+        else:
+            print(f"❌ Ошибка отправки фото: {resp.text}")
+            return False
+    except Exception as e:
+        print(f"❌ Исключение при отправке фото: {e}")
+        return False
+
+def send_telegram_message(chat_id: int, text: str) -> bool:
+    """Отправляет только текст (если не удалось найти или сгенерировать изображение)."""
+    url = f"https://api.telegram.org/bot{TG_BOT_TOKEN}/sendMessage"
+    try:
+        resp = requests.post(url, json={"chat_id": chat_id, "text": text}, timeout=30)
+        if resp.status_code == 200:
+            print(f"✅ Сообщение отправлено в чат {chat_id}")
+            return True
+        else:
+            print(f"❌ Ошибка отправки: {resp.text}")
+            return False
+    except Exception as e:
+        print(f"❌ Исключение: {e}")
+        return False
 
 # ===================== ГЕНЕРАЦИЯ ПОСТА С FALLBACK =====================
 def generate_post(news_list):
@@ -255,13 +340,11 @@ def generate_post(news_list):
     random_greeting = random.choice(GREETINGS)
     random_closing = random.choice(CLOSINGS)
 
-    # Формируем контекст новостей
     news_context = "\n\n".join([
         f"ИСТОЧНИК: {n['source']}\nЗАГОЛОВОК: {n['title']}\nОПИСАНИЕ: {n['summary']}\nССЫЛКА: {n['link']}"
         for n in news_list
     ])
 
-    # Промпт с характером
     full_prompt = f"""{SYSTEM_PROMPT}
 
 Вот свежие новости:
@@ -271,7 +354,6 @@ def generate_post(news_list):
 Напиши пост. Начни его с приветствия: "{random_greeting}". Затем перескажи новости. В конце добавь вопрос к подписчикам или пожелание, например: "{random_closing}"
 """
 
-    # --- FALLBACK ЛОГИКА: ПЕРЕБИРАЕМ МОДЕЛИ ПО ОЧЕРЕДИ ---
     for model_id in FALLBACK_MODELS:
         try:
             print(f"🔄 Пробую модель: {model_id}")
@@ -291,8 +373,6 @@ def generate_post(news_list):
         except Exception as e:
             print(f"⚠️ Ошибка с моделью {model_id}: {str(e)[:100]}, пробую следующую...")
             continue
-
-    # Если ни одна модель не сработала
     return "❌ Не удалось сгенерировать пост. Все модели недоступны."
 
 # ===================== ОТВЕТЫ НА КОММЕНТАРИИ С FALLBACK =====================
@@ -308,7 +388,6 @@ def generate_reply(comment_text: str, post_content: str) -> str:
 
 Напиши ответ (2-3 предложения). Не копируй фразы из комментария, а отвечай по существу. Если комментарий про Max — можешь слегка подколоть. Если про Python или ИИ — порадуйся вместе с подписчиком.
 """
-    # --- FALLBACK ЛОГИКА ДЛЯ ОТВЕТОВ ---
     for model_id in FALLBACK_MODELS:
         try:
             print(f"🔄 Пробую модель для ответа: {model_id}")
@@ -371,11 +450,7 @@ def check_and_reply_to_comments():
             print(f"📝 Новый комментарий от @{username}: {comment_text[:50]}...")
             reply_text = generate_reply(comment_text, last_post['content'])
             if reply_text:
-                reply_payload = {
-                    "chat_id": chat_id,
-                    "text": reply_text,
-                    "reply_to_message_id": comment_id
-                }
+                reply_payload = {"chat_id": chat_id, "text": reply_text, "reply_to_message_id": comment_id}
                 reply_resp = requests.post(f"https://api.telegram.org/bot{TG_BOT_TOKEN}/sendMessage", json=reply_payload, timeout=30)
                 if reply_resp.status_code == 200:
                     print(f"✅ Ответ отправлен на комментарий {comment_id}")
@@ -426,17 +501,6 @@ def check_creator_messages():
     except Exception as e:
         print(f"❌ Ошибка при проверке сообщений создателя: {e}")
 
-def send_telegram_message(chat_id: int, text: str):
-    url = f"https://api.telegram.org/bot{TG_BOT_TOKEN}/sendMessage"
-    try:
-        resp = requests.post(url, json={"chat_id": chat_id, "text": text}, timeout=30)
-        if resp.status_code == 200:
-            print(f"✅ Сообщение отправлено в чат {chat_id}")
-        else:
-            print(f"❌ Ошибка отправки: {resp.text}")
-    except Exception as e:
-        print(f"❌ Исключение: {e}")
-
 # ===================== ПУБЛИКАЦИЯ НОВОГО ПОСТА =====================
 def publish_new_post():
     print("📝 Начинаю публикацию нового поста...")
@@ -446,29 +510,38 @@ def publish_new_post():
         send_telegram_message(CREATOR_ID, "❌ Нет новых новостей для публикации.")
         return
 
+    top_news = news_list[0]
+    print(f"🏆 Выбрана главная новость: {top_news['title']}")
+
     post_content = generate_post(news_list)
-    if post_content and not post_content.startswith("❌"):
-        url = f"https://api.telegram.org/bot{TG_BOT_TOKEN}/sendMessage"
-        payload = {"chat_id": TG_CHANNEL_ID, "text": post_content}
-        try:
-            resp = requests.post(url, json=payload, timeout=30)
-            if resp.status_code == 200:
-                result = resp.json()
-                message_id = result.get("result", {}).get("message_id")
-                save_post(message_id, post_content)
-                for news in news_list:
-                    save_published_news(news['link'], news['title'])
-                print(f"✅ Пост опубликован! ID: {message_id}")
-                send_telegram_message(CREATOR_ID, f"✅ Пост опубликован! ID: {message_id}")
-            else:
-                print(f"❌ Ошибка публикации: {resp.text}")
-                send_telegram_message(CREATOR_ID, f"❌ Ошибка публикации: {resp.text[:100]}")
-        except Exception as e:
-            print(f"❌ Исключение: {e}")
-            send_telegram_message(CREATOR_ID, f"❌ Исключение: {e}")
-    else:
+    if not post_content or post_content.startswith("❌"):
         print(f"❌ Не удалось сгенерировать пост: {post_content}")
         send_telegram_message(CREATOR_ID, f"❌ Не удалось сгенерировать пост: {post_content}")
+        return
+
+    # 1. Пытаемся найти изображение на Pexels
+    image_bytes = search_pexels_image(top_news['title'])
+    
+    # 2. Если не нашли — пробуем сгенерировать через AI
+    if not image_bytes:
+        image_prompt = f"{top_news['title']}. {top_news['summary']}"
+        image_bytes = generate_image(image_prompt)
+
+    # 3. Отправляем результат
+    if image_bytes:
+        success = send_telegram_photo(TG_CHANNEL_ID, image_bytes, post_content)
+    else:
+        success = send_telegram_message(TG_CHANNEL_ID, post_content)
+
+    if success:
+        save_post(0, post_content)
+        for news in news_list:
+            save_published_news(news['link'], news['title'])
+        print(f"✅ Пост опубликован!")
+        send_telegram_message(CREATOR_ID, f"✅ Пост опубликован!")
+    else:
+        print(f"❌ Ошибка публикации поста.")
+        send_telegram_message(CREATOR_ID, f"❌ Ошибка публикации поста.")
 
 # ===================== ОСНОВНАЯ ЛОГИКА =====================
 def main():
