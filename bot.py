@@ -182,12 +182,11 @@ def calculate_priority(news_item):
 def fetch_fresh_news(limit: int = 5):
     print("📰 Запрашиваю свежие новости...")
     news_sources = [
-        {"name": "Habr", "url": "https://habr.com/ru/rss/feed/posts/?fl=ru"},
-        {"name": "3DNews", "url": "https://3dnews.ru/news/all/"},
-        {"name": "CNews", "url": "https://www.cnews.ru/rss/news/"},
-        {"name": "iXBT", "url": "https://www.ixbt.com/news.rss"},
-        {"name": "Ferra", "url": "https://ferra.ru/rss/news/"},
-        {"name": "SecurityLab", "url": "https://www.securitylab.ru/export/rss/"},
+        {"name": "Habr", "url": "https://habr.com/ru/rss/articles/?fl=ru"},
+        {"name": "3DNews", "url": "https://3dnews.ru/news/rss/"},
+        {"name": "CNews", "url": "https://www.cnews.ru/inc/rss/news.xml"},
+        {"name": "Ferra", "url": "https://www.ferra.ru/exports/rss.xml"},
+        {"name": "SecurityLab", "url": "https://www.securitylab.ru/_services/export/rss/"},
         {"name": "vc.ru", "url": "https://vc.ru/rss/"},
         {"name": "Kod", "url": "https://kod.ru/rss/"},
         {"name": "Overclockers", "url": "https://overclockers.ru/rss/news.rss"},
@@ -269,11 +268,16 @@ def generate_image(prompt: str) -> bytes | None:
             print(f"⚠️ Ошибка с моделью {model}: {e}")
     return None
 
-# ===================== ОТПРАВКА С ОБРЕЗКОЙ ПОДПИСИ =====================
+# ===================== ОТПРАВКА В TELEGRAM (БЕЗ ОБРЕЗКИ, ПРОСТО РАЗДЕЛЕНИЕ) =====================
 def send_telegram_photo(chat_id: int, photo_bytes: bytes, caption: str) -> bool:
-    MAX_CAPTION = 1000
+    """
+    Отправляет фото. Если подпись длиннее 1024 символов, отправляет фото без подписи,
+    а текст — отдельным сообщением.
+    """
+    MAX_CAPTION = 1024
     url = f"https://api.telegram.org/bot{TG_BOT_TOKEN}/sendPhoto"
     files = {"photo": ("image.png", photo_bytes, "image/png")}
+    
     if len(caption) <= MAX_CAPTION:
         data = {"chat_id": chat_id, "caption": caption, "parse_mode": "HTML"}
         try:
@@ -288,22 +292,22 @@ def send_telegram_photo(chat_id: int, photo_bytes: bytes, caption: str) -> bool:
             print(f"❌ Исключение: {e}")
             return False
     else:
-        short = caption[:MAX_CAPTION] + "\n\n… (продолжение в следующем сообщении)"
-        data = {"chat_id": chat_id, "caption": short, "parse_mode": "HTML"}
+        print(f"⚠️ Подпись длиной {len(caption)} превышает лимит. Отправляю фото без подписи, текст отдельно.")
+        data_no_caption = {"chat_id": chat_id}
         try:
-            resp_photo = requests.post(url, files=files, data=data, timeout=30)
+            resp_photo = requests.post(url, files=files, data=data_no_caption, timeout=30)
             if resp_photo.status_code != 200:
-                print(f"❌ Ошибка отправки фото (обрезанная подпись): {resp_photo.text}")
+                print(f"❌ Ошибка отправки фото (без подписи): {resp_photo.text}")
                 return False
-            print("✅ Фото с обрезанной подписью отправлено.")
-            remainder = caption[MAX_CAPTION:]
+            print("✅ Фото отправлено без подписи.")
+            # Отправляем текст отдельно
             msg_url = f"https://api.telegram.org/bot{TG_BOT_TOKEN}/sendMessage"
-            resp_msg = requests.post(msg_url, json={"chat_id": chat_id, "text": remainder, "parse_mode": "HTML"}, timeout=30)
+            resp_msg = requests.post(msg_url, json={"chat_id": chat_id, "text": caption, "parse_mode": "HTML"}, timeout=30)
             if resp_msg.status_code == 200:
-                print("✅ Остаток текста отправлен.")
+                print("✅ Текст отправлен отдельно.")
                 return True
             else:
-                print(f"❌ Ошибка отправки остатка текста: {resp_msg.text}")
+                print(f"❌ Ошибка отправки текста: {resp_msg.text}")
                 return False
         except Exception as e:
             print(f"❌ Исключение: {e}")
@@ -460,7 +464,7 @@ def check_creator_messages():
     except Exception as e:
         print(f"❌ Ошибка: {e}")
 
-# ===================== ПУБЛИКАЦИЯ (С ОТЛАДКОЙ) =====================
+# ===================== ПУБЛИКАЦИЯ =====================
 def publish_new_post():
     print("📝 Публикация нового поста...")
     try:
@@ -475,20 +479,13 @@ def publish_new_post():
             send_telegram_message(CREATOR_ID, f"❌ Ошибка генерации: {post_content}")
             return
         print("📸 Пост сгенерирован, ищем картинку...")
-        image = None
-        if PEXELS_API_KEY:
-            print("DEBUG: Вызываю search_pexels_image...")
-            image = search_pexels_image(top_news['title'])
-        else:
-            print("DEBUG: PEXELS_API_KEY отсутствует, переходим к генерации.")
+        image = search_pexels_image(top_news['title'])
         if not image and HF_API_TOKEN:
-            print("DEBUG: Вызываю generate_image...")
             image = generate_image(f"{top_news['title']} {top_news['summary']}")
         if image:
-            print("DEBUG: Отправляю фото с подписью.")
             success = send_telegram_photo(TG_CHANNEL_ID, image, post_content)
         else:
-            print("DEBUG: Отправляю только текст.")
+            print("⚠️ Не удалось получить изображение, отправляю только текст.")
             success = send_telegram_message(TG_CHANNEL_ID, post_content)
         if success:
             save_post(0, post_content)
