@@ -53,5 +53,6 @@ jobs:
           TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
           TG_GROUP_ID: ${{ secrets.TG_GROUP_ID }}
           CREATOR_ID: ${{ secrets.CREATOR_ID }}
+          PEXELS_API_KEY: ${{ secrets.PEXELS_API_KEY }}
           TEST_MODE: ${{ github.event.inputs.test_mode || 'false' }}
         run: python bot.py
