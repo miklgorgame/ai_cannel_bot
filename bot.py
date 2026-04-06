@@ -4,6 +4,7 @@ import sqlite3
 import feedparser
 import requests
 import random
+import time
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 from huggingface_hub import InferenceClient
@@ -212,9 +213,12 @@ def fetch_fresh_news(limit: int = 5):
         except Exception as e:
             print(f"    ⚠️ Ошибка {source['name']}: {e}")
     if not all_candidates:
+        print("⚠️ Новостей нет.")
         return []
     all_candidates.sort(key=calculate_priority)
-    return all_candidates[:limit]
+    top_news = all_candidates[:limit]
+    print(f"✅ Отобрано {len(top_news)} новостей.")
+    return top_news
 
 # ===================== ПОИСК И ГЕНЕРАЦИЯ ИЗОБРАЖЕНИЙ =====================
 def search_pexels_image(query: str) -> bytes | None:
@@ -255,7 +259,7 @@ def generate_image(prompt: str) -> bytes | None:
 
 # ===================== ОТПРАВКА С ОБРЕЗКОЙ ПОДПИСИ =====================
 def send_telegram_photo(chat_id: int, photo_bytes: bytes, caption: str) -> bool:
-    MAX_CAPTION = 1000  # запас под лимит Telegram 1024
+    MAX_CAPTION = 1000
     url = f"https://api.telegram.org/bot{TG_BOT_TOKEN}/sendPhoto"
     files = {"photo": ("image.png", photo_bytes, "image/png")}
     if len(caption) <= MAX_CAPTION:
@@ -266,14 +270,12 @@ def send_telegram_photo(chat_id: int, photo_bytes: bytes, caption: str) -> bool:
         except:
             return False
     else:
-        # Обрезаем подпись и добавляем пометку о продолжении
         short = caption[:MAX_CAPTION] + "\n\n… (продолжение в следующем сообщении)"
         data = {"chat_id": chat_id, "caption": short, "parse_mode": "HTML"}
         try:
             resp_photo = requests.post(url, files=files, data=data, timeout=30)
             if resp_photo.status_code != 200:
                 return False
-            # Отправляем остаток текста отдельным сообщением
             remainder = caption[MAX_CAPTION:]
             msg_url = f"https://api.telegram.org/bot{TG_BOT_TOKEN}/sendMessage"
             resp_msg = requests.post(msg_url, json={"chat_id": chat_id, "text": remainder, "parse_mode": "HTML"}, timeout=30)
@@ -310,6 +312,7 @@ def generate_post(news_list):
 """
     for model in FALLBACK_MODELS:
         try:
+            print(f"🔄 Пробую модель: {model}")
             client = InferenceClient(api_key=HF_API_TOKEN, provider="auto")
             completion = client.chat.completions.create(
                 model=model,
@@ -319,8 +322,10 @@ def generate_post(news_list):
             )
             result = completion.choices[0].message.content.strip()
             if result:
+                print(f"✅ Успешно сгенерировано с помощью {model}")
                 return result
-        except:
+        except Exception as e:
+            print(f"⚠️ Ошибка с моделью {model}: {e}")
             continue
     return "❌ Не удалось сгенерировать пост."
 
@@ -428,9 +433,10 @@ def publish_new_post():
     print("📝 Публикация нового поста...")
     news_list = fetch_fresh_news(limit=5)
     if not news_list:
-        send_telegram_message(CREATOR_ID, "❌ Нет новых новостей.")
+        send_telegram_message(CREATOR_ID, "❌ Нет новых новостей для публикации.")
         return
     top_news = news_list[0]
+    print(f"🏆 Главная новость: {top_news['title'][:80]}...")
     post_content = generate_post(news_list)
     if not post_content or post_content.startswith("❌"):
         send_telegram_message(CREATOR_ID, f"❌ Ошибка генерации: {post_content}")
