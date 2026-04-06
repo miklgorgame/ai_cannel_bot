@@ -4,7 +4,6 @@ import sqlite3
 import feedparser
 import requests
 import random
-import time
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 from huggingface_hub import InferenceClient
@@ -223,8 +222,9 @@ def fetch_fresh_news(limit: int = 5):
 # ===================== ПОИСК И ГЕНЕРАЦИЯ ИЗОБРАЖЕНИЙ =====================
 def search_pexels_image(query: str) -> bytes | None:
     if not PEXELS_API_KEY:
+        print("⚠️ PEXELS_API_KEY не задан, пропускаем поиск.")
         return None
-    print(f"🔍 Ищу изображение на Pexels...")
+    print(f"🔍 Ищу изображение на Pexels по запросу: {query[:80]}...")
     search_query = ' '.join(query.split()[:5])
     headers = {"Authorization": PEXELS_API_KEY}
     params = {"query": search_query, "per_page": 5, "orientation": "landscape"}
@@ -236,25 +236,37 @@ def search_pexels_image(query: str) -> bytes | None:
                 img_url = photos[0]["src"]["large"]
                 img_resp = requests.get(img_url, timeout=30)
                 if img_resp.status_code == 200:
+                    print("✅ Изображение найдено на Pexels.")
                     return img_resp.content
+                else:
+                    print(f"⚠️ Не удалось скачать изображение: {img_resp.status_code}")
+            else:
+                print("⚠️ На Pexels ничего не найдено.")
+        else:
+            print(f"⚠️ Ошибка Pexels API: {resp.status_code}")
     except Exception as e:
-        print(f"⚠️ Pexels ошибка: {e}")
+        print(f"⚠️ Исключение при поиске на Pexels: {e}")
     return None
 
 def generate_image(prompt: str) -> bytes | None:
-    print("🎨 Резервная генерация изображения...")
+    print("🎨 Резервная генерация изображения через AI...")
     if not HF_API_TOKEN:
+        print("⚠️ Нет токена HF для генерации изображения.")
         return None
     enhanced_prompt = f"Create a realistic cover image for news: {prompt}. No text."
     headers = {"Authorization": f"Bearer {HF_API_TOKEN}"}
     for model in IMAGE_MODELS:
         try:
+            print(f"🔄 Пробую модель {model}...")
             url = f"https://api-inference.huggingface.co/models/{model}"
             resp = requests.post(url, headers=headers, json={"inputs": enhanced_prompt}, timeout=60)
             if resp.status_code == 200:
+                print(f"✅ Изображение сгенерировано через {model}.")
                 return resp.content
-        except:
-            continue
+            else:
+                print(f"⚠️ Модель {model} вернула {resp.status_code}")
+        except Exception as e:
+            print(f"⚠️ Ошибка с моделью {model}: {e}")
     return None
 
 # ===================== ОТПРАВКА С ОБРЕЗКОЙ ПОДПИСИ =====================
@@ -266,8 +278,14 @@ def send_telegram_photo(chat_id: int, photo_bytes: bytes, caption: str) -> bool:
         data = {"chat_id": chat_id, "caption": caption, "parse_mode": "HTML"}
         try:
             resp = requests.post(url, files=files, data=data, timeout=30)
-            return resp.status_code == 200
-        except:
+            if resp.status_code == 200:
+                print("✅ Фото с подписью отправлено.")
+                return True
+            else:
+                print(f"❌ Ошибка отправки фото: {resp.text}")
+                return False
+        except Exception as e:
+            print(f"❌ Исключение: {e}")
             return False
     else:
         short = caption[:MAX_CAPTION] + "\n\n… (продолжение в следующем сообщении)"
@@ -275,20 +293,34 @@ def send_telegram_photo(chat_id: int, photo_bytes: bytes, caption: str) -> bool:
         try:
             resp_photo = requests.post(url, files=files, data=data, timeout=30)
             if resp_photo.status_code != 200:
+                print(f"❌ Ошибка отправки фото (обрезанная подпись): {resp_photo.text}")
                 return False
+            print("✅ Фото с обрезанной подписью отправлено.")
             remainder = caption[MAX_CAPTION:]
             msg_url = f"https://api.telegram.org/bot{TG_BOT_TOKEN}/sendMessage"
             resp_msg = requests.post(msg_url, json={"chat_id": chat_id, "text": remainder, "parse_mode": "HTML"}, timeout=30)
-            return resp_msg.status_code == 200
-        except:
+            if resp_msg.status_code == 200:
+                print("✅ Остаток текста отправлен.")
+                return True
+            else:
+                print(f"❌ Ошибка отправки остатка текста: {resp_msg.text}")
+                return False
+        except Exception as e:
+            print(f"❌ Исключение: {e}")
             return False
 
 def send_telegram_message(chat_id: int, text: str) -> bool:
     url = f"https://api.telegram.org/bot{TG_BOT_TOKEN}/sendMessage"
     try:
         resp = requests.post(url, json={"chat_id": chat_id, "text": text}, timeout=30)
-        return resp.status_code == 200
-    except:
+        if resp.status_code == 200:
+            print(f"✅ Сообщение отправлено в чат {chat_id}.")
+            return True
+        else:
+            print(f"❌ Ошибка отправки сообщения: {resp.text}")
+            return False
+    except Exception as e:
+        print(f"❌ Исключение: {e}")
         return False
 
 # ===================== ГЕНЕРАЦИЯ ТЕКСТА =====================
@@ -428,34 +460,47 @@ def check_creator_messages():
     except Exception as e:
         print(f"❌ Ошибка: {e}")
 
-# ===================== ПУБЛИКАЦИЯ =====================
+# ===================== ПУБЛИКАЦИЯ (С ОТЛАДКОЙ) =====================
 def publish_new_post():
     print("📝 Публикация нового поста...")
-    news_list = fetch_fresh_news(limit=5)
-    if not news_list:
-        send_telegram_message(CREATOR_ID, "❌ Нет новых новостей для публикации.")
-        return
-    top_news = news_list[0]
-    print(f"🏆 Главная новость: {top_news['title'][:80]}...")
-    post_content = generate_post(news_list)
-    if not post_content or post_content.startswith("❌"):
-        send_telegram_message(CREATOR_ID, f"❌ Ошибка генерации: {post_content}")
-        return
-    # Ищем или генерируем картинку
-    image = search_pexels_image(top_news['title'])
-    if not image:
-        image = generate_image(f"{top_news['title']} {top_news['summary']}")
-    if image:
-        success = send_telegram_photo(TG_CHANNEL_ID, image, post_content)
-    else:
-        success = send_telegram_message(TG_CHANNEL_ID, post_content)
-    if success:
-        save_post(0, post_content)
-        for news in news_list:
-            save_published_news(news['link'], news['title'])
-        send_telegram_message(CREATOR_ID, "✅ Пост опубликован!")
-    else:
-        send_telegram_message(CREATOR_ID, "❌ Ошибка публикации.")
+    try:
+        news_list = fetch_fresh_news(limit=5)
+        if not news_list:
+            send_telegram_message(CREATOR_ID, "❌ Нет новых новостей для публикации.")
+            return
+        top_news = news_list[0]
+        print(f"🏆 Главная новость: {top_news['title'][:80]}...")
+        post_content = generate_post(news_list)
+        if not post_content or post_content.startswith("❌"):
+            send_telegram_message(CREATOR_ID, f"❌ Ошибка генерации: {post_content}")
+            return
+        print("📸 Пост сгенерирован, ищем картинку...")
+        image = None
+        if PEXELS_API_KEY:
+            print("DEBUG: Вызываю search_pexels_image...")
+            image = search_pexels_image(top_news['title'])
+        else:
+            print("DEBUG: PEXELS_API_KEY отсутствует, переходим к генерации.")
+        if not image and HF_API_TOKEN:
+            print("DEBUG: Вызываю generate_image...")
+            image = generate_image(f"{top_news['title']} {top_news['summary']}")
+        if image:
+            print("DEBUG: Отправляю фото с подписью.")
+            success = send_telegram_photo(TG_CHANNEL_ID, image, post_content)
+        else:
+            print("DEBUG: Отправляю только текст.")
+            success = send_telegram_message(TG_CHANNEL_ID, post_content)
+        if success:
+            save_post(0, post_content)
+            for news in news_list:
+                save_published_news(news['link'], news['title'])
+            send_telegram_message(CREATOR_ID, "✅ Пост опубликован!")
+        else:
+            send_telegram_message(CREATOR_ID, "❌ Ошибка публикации (отправка не удалась).")
+    except Exception as e:
+        error_msg = f"❌ Критическая ошибка: {str(e)}"
+        print(error_msg)
+        send_telegram_message(CREATOR_ID, error_msg)
 
 # ===================== MAIN =====================
 def main():
