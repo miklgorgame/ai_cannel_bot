@@ -460,41 +460,56 @@ def generate_reply(comment_text: str, post_content: str) -> str:
 
 # ===================== КОММЕНТАРИИ И КОМАНДЫ =====================
 async def check_and_reply_to_comments(bot: Bot):
-    logger.info("💬 Проверяю комментарии...")
+    logger.info("💬 Проверяю комментарии (включая старые)...")
     last_post = get_last_post()
     if not last_post:
+        logger.info("Нет постов для проверки комментариев.")
         return
-    offset = get_comments_offset()
+    
+    # Получаем последние 100 обновлений (без offset, чтобы увидеть все)
     try:
-        updates = await bot.get_updates(offset=offset, timeout=30, allowed_updates=["message"])
-        max_id = offset - 1
-        for update in updates:
-            if update.update_id > max_id:
-                max_id = update.update_id
-            msg = update.message
-            if not msg:
-                continue
-            chat_id = msg.chat_id
-            if COMMENTS_CHAT_ID and str(chat_id) != str(COMMENTS_CHAT_ID):
-                continue
-            reply_to = msg.reply_to_message
-            if not reply_to or reply_to.message_id != last_post['message_id']:
-                continue
-            comment_id = msg.message_id
-            if is_comment_processed(comment_id):
-                continue
-            text = msg.text
-            if not text:
-                continue
-            logger.info(f"📝 Комментарий: {text[:50]}...")
-            reply = generate_reply(text, last_post['content'])
-            if reply:
-                await send_telegram_message(chat_id, reply, bot)
-                mark_comment_processed(comment_id, last_post['id'])
-        if max_id >= offset:
-            save_comments_offset(max_id + 1)
+        updates = await bot.get_updates(offset=-1, limit=100, timeout=10, allowed_updates=["message"])
     except Exception as e:
-        logger.error(f"Ошибка проверки комментариев: {e}")
+        logger.error(f"Ошибка получения обновлений: {e}")
+        return
+    
+    logger.info(f"Получено {len(updates)} обновлений.")
+    processed_count = 0
+    for update in updates:
+        msg = update.message
+        if not msg:
+            continue
+        
+        # Проверяем, что сообщение из нужного чата (группа или канал)
+        chat_id = msg.chat_id
+        if COMMENTS_CHAT_ID and str(chat_id) != str(COMMENTS_CHAT_ID):
+            continue
+        
+        # Проверяем, что это ответ на наш пост
+        reply_to = msg.reply_to_message
+        if not reply_to or reply_to.message_id != last_post['message_id']:
+            continue
+        
+        comment_id = msg.message_id
+        if is_comment_processed(comment_id):
+            continue
+        
+        text = msg.text
+        if not text:
+            continue
+        
+        logger.info(f"📝 Найден комментарий (ID={comment_id}): {text[:50]}...")
+        reply = generate_reply(text, last_post['content'])
+        if reply:
+            await send_telegram_message(chat_id, reply, bot)
+            mark_comment_processed(comment_id, last_post['id'])
+            processed_count += 1
+            logger.info(f"✅ Ответ отправлен на комментарий {comment_id}")
+        else:
+            logger.warning(f"Не удалось сгенерировать ответ на комментарий {comment_id}")
+            mark_comment_processed(comment_id, last_post['id'])  # чтобы не пытаться снова
+    
+    logger.info(f"Обработано комментариев: {processed_count}")
 
 async def check_creator_messages(bot: Bot):
     logger.info("👤 Проверяю сообщения создателя...")
