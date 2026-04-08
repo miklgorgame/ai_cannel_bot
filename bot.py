@@ -5,12 +5,15 @@ import feedparser
 import requests
 import random
 import time
+import asyncio
 import logging
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 from huggingface_hub import InferenceClient
+from telegram import Bot
+from telegram.error import TelegramError
 
 # ===================== НАСТРОЙКА ЛОГИРОВАНИЯ =====================
 logging.basicConfig(
@@ -35,13 +38,18 @@ OFFSET_CREATOR_FILE = "offset_creator.txt"
 IZHEVSK_TZ = ZoneInfo("Europe/Samara")
 
 COMMENTS_CHAT_ID = TG_GROUP_ID if TG_GROUP_ID else TG_CHANNEL_ID
-
-# Максимальный возраст новости в днях (не старше 2 дней)
 MAX_NEWS_AGE_DAYS = 2
 
 SOURCE_PRIORITY = {
-    "Habr": 1, "iXBT": 2, "3DNews": 3, "SecurityLab": 4,
-    "vc.ru": 5, "Kod": 6, "CNews": 7, "Ferra": 8, "Overclockers": 9,
+    "Habr": 1,
+    "iXBT": 2,
+    "3DNews": 3,
+    "SecurityLab": 4,
+    "vc.ru": 5,
+    "Kod": 6,
+    "CNews": 7,
+    "Ferra": 8,
+    "Overclockers": 9,
 }
 
 KEYWORDS = [
@@ -51,8 +59,11 @@ KEYWORDS = [
 ]
 
 GREETINGS = [
-    "Привет, друзья! 👋", "Здравствуйте, уважаемые подписчики! 💻",
-    "Всем привет! 🤗", "Доброго времени суток! 🌞", "Приветствую, IT-энтузиасты! 🚀"
+    "Привет, друзья! 👋",
+    "Здравствуйте, уважаемые подписчики! 💻",
+    "Всем привет! 🤗",
+    "Доброго времени суток! 🌞",
+    "Приветствую, IT-энтузиасты! 🚀"
 ]
 
 CLOSINGS = [
@@ -140,9 +151,7 @@ def is_comment_processed(comment_id: int) -> bool:
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
     c.execute("SELECT 1 FROM processed_comments WHERE comment_id = ?", (comment_id,))
-    result = c.fetchone() is not None
-    conn.close()
-    return result
+    return c.fetchone() is not None
 
 def mark_comment_processed(comment_id: int, post_id: int):
     conn = sqlite3.connect(DB_FILE)
@@ -156,9 +165,7 @@ def is_news_already_published(link: str) -> bool:
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
     c.execute("SELECT 1 FROM published_news WHERE link = ?", (link,))
-    result = c.fetchone() is not None
-    conn.close()
-    return result
+    return c.fetchone() is not None
 
 def save_published_news(link: str, title: str):
     conn = sqlite3.connect(DB_FILE)
@@ -206,9 +213,8 @@ def save_creator_offset(offset):
     with open(OFFSET_CREATOR_FILE, "w") as f:
         f.write(str(offset))
 
-# ===================== НОВОСТИ С ФИЛЬТРАЦИЕЙ ПО ДАТЕ =====================
+# ===================== НОВОСТИ С ПРАВИЛЬНЫМИ RSS =====================
 def parse_rss_date(entry):
-    """Извлекает дату из записи RSS и возвращает datetime или None."""
     if hasattr(entry, 'published_parsed') and entry.published_parsed:
         return datetime.fromtimestamp(time.mktime(entry.published_parsed))
     if hasattr(entry, 'updated_parsed') and entry.updated_parsed:
@@ -235,6 +241,7 @@ def calculate_priority(news_item):
 
 def fetch_fresh_news(limit: int = 5):
     logger.info("📰 Запрашиваю свежие новости...")
+    # Правильные RSS-ссылки
     news_sources = [
         {"name": "Habr", "url": "https://habr.com/ru/rss/articles/?fl=ru"},
         {"name": "3DNews", "url": "https://3dnews.ru/news/rss/"},
@@ -325,103 +332,67 @@ def generate_image(prompt: str) -> bytes | None:
             logger.warning(f"⚠️ Ошибка с моделью {model}: {e}")
     return None
 
-# ===================== ОТПРАВКА В TELEGRAM =====================
-def send_telegram_photo(chat_id: int, photo_bytes: bytes, caption: str) -> tuple[bool, int | None]:
+# ===================== АСИНХРОННЫЕ ФУНКЦИИ TELEGRAM =====================
+async def send_telegram_photo(chat_id: int, photo_bytes: bytes, caption: str, bot: Bot) -> tuple[bool, int | None]:
     MAX_CAPTION = 1024
-    url = f"https://api.telegram.org/bot{TG_BOT_TOKEN}/sendPhoto"
-    files = {"photo": ("image.png", photo_bytes, "image/png")}
-    
     if len(caption) <= MAX_CAPTION:
-        data = {"chat_id": chat_id, "caption": caption, "parse_mode": "HTML"}
         try:
-            resp = http_session.post(url, files=files, data=data, timeout=30)
-            if resp.status_code == 200:
-                result = resp.json()
-                message_id = result.get("result", {}).get("message_id")
-                logger.info(f"✅ Фото отправлено в чат {chat_id}, message_id={message_id}")
-                return True, message_id
-            else:
-                logger.error(f"❌ Ошибка отправки фото: {resp.text}")
-                return False, None
-        except Exception as e:
-            logger.error(f"❌ Исключение: {e}")
+            msg = await bot.send_photo(chat_id=chat_id, photo=photo_bytes, caption=caption, parse_mode="HTML")
+            return True, msg.message_id
+        except TelegramError as e:
+            logger.error(f"Ошибка отправки фото: {e}")
             return False, None
     else:
-        logger.info(f"⚠️ Подпись длиной {len(caption)} превышает лимит. Отправляю фото без подписи, текст отдельно.")
-        data_no_caption = {"chat_id": chat_id}
+        logger.info(f"Подпись длиной {len(caption)} превышает лимит, отправляю фото без подписи, текст отдельно.")
         try:
-            resp_photo = http_session.post(url, files=files, data=data_no_caption, timeout=30)
-            if resp_photo.status_code != 200:
-                logger.error(f"❌ Ошибка отправки фото (без подписи): {resp_photo.text}")
-                return False, None
-            result = resp_photo.json()
-            message_id = result.get("result", {}).get("message_id")
-            logger.info(f"✅ Фото отправлено без подписи, message_id={message_id}")
-            success_text, _ = send_telegram_message(chat_id, caption)
-            return success_text, message_id
-        except Exception as e:
-            logger.error(f"❌ Исключение: {e}")
+            msg_photo = await bot.send_photo(chat_id=chat_id, photo=photo_bytes)
+            await bot.send_message(chat_id=chat_id, text=caption, parse_mode="HTML")
+            return True, msg_photo.message_id
+        except TelegramError as e:
+            logger.error(f"Ошибка отправки: {e}")
             return False, None
 
-def send_telegram_message(chat_id: int, text: str) -> tuple[bool, int | None]:
-    url = f"https://api.telegram.org/bot{TG_BOT_TOKEN}/sendMessage"
+async def send_telegram_message(chat_id: int, text: str, bot: Bot) -> tuple[bool, int | None]:
     try:
-        resp = http_session.post(url, json={"chat_id": chat_id, "text": text, "parse_mode": "HTML"}, timeout=30)
-        if resp.status_code == 200:
-            result = resp.json()
-            message_id = result.get("result", {}).get("message_id")
-            logger.info(f"✅ Сообщение отправлено в чат {chat_id}, message_id={message_id}")
-            return True, message_id
-        else:
-            logger.error(f"❌ Ошибка отправки сообщения: {resp.text}")
-            return False, None
-    except Exception as e:
-        logger.error(f"❌ Исключение: {e}")
+        msg = await bot.send_message(chat_id=chat_id, text=text, parse_mode="HTML")
+        return True, msg.message_id
+    except TelegramError as e:
+        logger.error(f"Ошибка отправки сообщения: {e}")
         return False, None
 
-# ===================== УДАЛЕНИЕ ДУБЛИКАТА ФОТО ИЗ ГРУППЫ ОБСУЖДЕНИЯ =====================
-def delete_duplicate_from_group(photo_message_id: int, post_text: str):
+async def delete_duplicate_from_group(photo_message_id: int, post_text: str, bot: Bot):
     if not TG_GROUP_ID:
         return
     logger.info(f"🔍 Ищу дубликат фото (message_id={photo_message_id}) в группе {TG_GROUP_ID}...")
-    time.sleep(5)
-    url = f"https://api.telegram.org/bot{TG_BOT_TOKEN}/getUpdates"
-    params = {"offset": get_comments_offset(), "timeout": 5, "allowed_updates": ["message"]}
+    await asyncio.sleep(5)
+    offset = get_comments_offset()
     try:
-        resp = http_session.get(url, params=params, timeout=10)
-        data = resp.json()
-        if not data.get("ok"):
-            logger.warning(f"Не удалось получить обновления: {data}")
-            return
-        max_id = get_comments_offset() - 1
-        for update in data.get("result", []):
-            update_id = update.get("update_id")
-            if update_id > max_id:
-                max_id = update_id
-            msg = update.get("message")
+        updates = await bot.get_updates(offset=offset, timeout=5, allowed_updates=["message"])
+        max_id = offset - 1
+        for update in updates:
+            if update.update_id > max_id:
+                max_id = update.update_id
+            msg = update.message
             if not msg:
                 continue
-            chat_id = msg.get("chat", {}).get("id")
-            if str(chat_id) != str(TG_GROUP_ID):
+            if msg.chat_id != int(TG_GROUP_ID):
                 continue
-            if msg.get("photo") and not msg.get("reply_to_message"):
-                caption = msg.get("caption", "")
+            if msg.photo and not msg.reply_to_message:
+                caption = msg.caption or ""
                 if caption and post_text.startswith(caption[:50]):
-                    logger.info(f"Найден дубликат фото в группе, message_id={msg['message_id']}")
-                    del_url = f"https://api.telegram.org/bot{TG_BOT_TOKEN}/deleteMessage"
-                    del_payload = {"chat_id": TG_GROUP_ID, "message_id": msg["message_id"]}
-                    del_resp = http_session.post(del_url, json=del_payload, timeout=5)
-                    if del_resp.status_code == 200:
+                    logger.info(f"Найден дубликат фото в группе, message_id={msg.message_id}")
+                    try:
+                        await bot.delete_message(chat_id=TG_GROUP_ID, message_id=msg.message_id)
                         logger.info("✅ Дубликат фото удалён из группы обсуждения.")
-                    else:
-                        logger.warning(f"❌ Не удалось удалить дубликат: {del_resp.text}")
+                    except TelegramError as e:
+                        logger.warning(f"Не удалось удалить дубликат: {e}")
                     break
-        if max_id >= get_comments_offset():
+        if max_id >= offset:
             save_comments_offset(max_id + 1)
     except Exception as e:
-        logger.warning(f"⚠️ Ошибка при удалении дубликата: {e}")
+        logger.warning(f"Ошибка при удалении дубликата: {e}")
 
-# ===================== ГЕНЕРАЦИЯ ТЕКСТА (ЕДИНЫЙ КЛИЕНТ) =====================
+# ===================== ГЕНЕРАЦИЯ ТЕКСТА =====================
 ai_client = None
 
 def generate_post(news_list):
@@ -487,146 +458,143 @@ def generate_reply(comment_text: str, post_content: str) -> str:
             continue
     return None
 
-# ===================== КОММЕНТАРИИ =====================
-def check_and_reply_to_comments():
+# ===================== КОММЕНТАРИИ И КОМАНДЫ =====================
+async def check_and_reply_to_comments(bot: Bot):
     logger.info("💬 Проверяю комментарии...")
     last_post = get_last_post()
     if not last_post:
         return
     offset = get_comments_offset()
-    url = f"https://api.telegram.org/bot{TG_BOT_TOKEN}/getUpdates"
-    params = {"offset": offset, "timeout": 30, "allowed_updates": ["message"]}
     try:
-        resp = http_session.get(url, params=params, timeout=35)
-        data = resp.json()
-        if not data.get("ok"):
-            return
+        updates = await bot.get_updates(offset=offset, timeout=30, allowed_updates=["message"])
         max_id = offset - 1
-        for update in data.get("result", []):
-            update_id = update.get("update_id")
-            if update_id > max_id:
-                max_id = update_id
-            msg = update.get("message")
+        for update in updates:
+            if update.update_id > max_id:
+                max_id = update.update_id
+            msg = update.message
             if not msg:
                 continue
-            chat_id = msg.get("chat", {}).get("id")
+            chat_id = msg.chat_id
             if COMMENTS_CHAT_ID and str(chat_id) != str(COMMENTS_CHAT_ID):
                 continue
-            reply_to = msg.get("reply_to_message")
-            if not reply_to or reply_to.get("message_id") != last_post['message_id']:
+            reply_to = msg.reply_to_message
+            if not reply_to or reply_to.message_id != last_post['message_id']:
                 continue
-            comment_id = msg.get("message_id")
+            comment_id = msg.message_id
             if is_comment_processed(comment_id):
                 continue
-            text = msg.get("text", "")
+            text = msg.text
             if not text:
                 continue
             logger.info(f"📝 Комментарий: {text[:50]}...")
             reply = generate_reply(text, last_post['content'])
             if reply:
-                send_telegram_message(chat_id, reply)
+                await send_telegram_message(chat_id, reply, bot)
                 mark_comment_processed(comment_id, last_post['id'])
         if max_id >= offset:
             save_comments_offset(max_id + 1)
     except Exception as e:
-        logger.error(f"❌ Ошибка: {e}")
+        logger.error(f"Ошибка проверки комментариев: {e}")
 
-def check_creator_messages():
+async def check_creator_messages(bot: Bot):
     logger.info("👤 Проверяю сообщения создателя...")
     offset = get_creator_offset()
-    url = f"https://api.telegram.org/bot{TG_BOT_TOKEN}/getUpdates"
-    params = {"offset": offset, "timeout": 30}
     try:
-        resp = http_session.get(url, params=params, timeout=35)
-        data = resp.json()
-        if not data.get("ok"):
-            return
+        updates = await bot.get_updates(offset=offset, timeout=30)
         max_id = offset - 1
-        for update in data.get("result", []):
-            update_id = update.get("update_id")
-            if update_id > max_id:
-                max_id = update_id
-            msg = update.get("message")
+        for update in updates:
+            if update.update_id > max_id:
+                max_id = update.update_id
+            msg = update.message
             if not msg:
                 continue
-            if msg.get("from", {}).get("id") == CREATOR_ID:
-                text = msg.get("text", "")
+            if msg.from_user.id == CREATOR_ID:
+                text = msg.text
                 if text.startswith("/generate"):
-                    publish_new_post()
+                    await publish_new_post(bot)
                 elif text.startswith("/stats"):
                     posts = get_recent_posts(10)
                     stats = f"📊 Постов: {len(posts)}"
-                    send_telegram_message(CREATOR_ID, stats)
+                    await send_telegram_message(CREATOR_ID, stats, bot)
                 else:
-                    send_telegram_message(CREATOR_ID, f"✅ Получено: {text}")
+                    await send_telegram_message(CREATOR_ID, f"✅ Получено: {text}", bot)
         if max_id >= offset:
             save_creator_offset(max_id + 1)
     except Exception as e:
-        logger.error(f"❌ Ошибка: {e}")
+        logger.error(f"Ошибка проверки команд создателя: {e}")
 
-# ===================== ПУБЛИКАЦИЯ =====================
-def publish_new_post():
+# ===================== ПУБЛИКАЦИЯ ПОСТА =====================
+async def publish_new_post(bot: Bot):
     logger.info("📝 Публикация нового поста...")
     try:
         news_list = fetch_fresh_news(limit=5)
         if not news_list:
-            send_telegram_message(CREATOR_ID, "❌ Нет новых новостей для публикации.")
+            await send_telegram_message(CREATOR_ID, "❌ Нет новых новостей для публикации.", bot)
             return
         top_news = news_list[0]
         logger.info(f"🏆 Главная новость: {top_news['title'][:80]}...")
         post_content = generate_post(news_list)
         if not post_content or post_content.startswith("❌"):
-            send_telegram_message(CREATOR_ID, f"❌ Ошибка генерации: {post_content}")
+            await send_telegram_message(CREATOR_ID, f"❌ Ошибка генерации: {post_content}", bot)
             return
         image = search_pexels_image(top_news['title'])
         if not image and HF_API_TOKEN:
             image = generate_image(f"{top_news['title']} {top_news['summary']}")
         if image:
-            success, msg_id = send_telegram_photo(TG_CHANNEL_ID, image, post_content)
+            success, msg_id = await send_telegram_photo(TG_CHANNEL_ID, image, post_content, bot)
             if success and msg_id:
                 logger.info(f"Фото отправлено, message_id={msg_id}")
-                delete_duplicate_from_group(msg_id, post_content)
+                await delete_duplicate_from_group(msg_id, post_content, bot)
                 save_post(msg_id, post_content)
                 for news in news_list:
                     save_published_news(news['link'], news['title'])
-                send_telegram_message(CREATOR_ID, "✅ Пост опубликован!")
+                await send_telegram_message(CREATOR_ID, "✅ Пост опубликован!", bot)
             else:
-                send_telegram_message(CREATOR_ID, "❌ Ошибка публикации фото.")
+                await send_telegram_message(CREATOR_ID, "❌ Ошибка публикации фото.", bot)
         else:
             logger.info("⚠️ Не удалось получить изображение, отправляю только текст.")
-            success, msg_id = send_telegram_message(TG_CHANNEL_ID, post_content)
+            success, msg_id = await send_telegram_message(TG_CHANNEL_ID, post_content, bot)
             if success and msg_id:
                 save_post(msg_id, post_content)
                 for news in news_list:
                     save_published_news(news['link'], news['title'])
-                send_telegram_message(CREATOR_ID, "✅ Пост опубликован (без фото).")
+                await send_telegram_message(CREATOR_ID, "✅ Пост опубликован (без фото).", bot)
             else:
-                send_telegram_message(CREATOR_ID, "❌ Ошибка публикации текста.")
+                await send_telegram_message(CREATOR_ID, "❌ Ошибка публикации текста.", bot)
     except Exception as e:
         error_msg = f"❌ Критическая ошибка: {str(e)}"
         logger.error(error_msg)
-        send_telegram_message(CREATOR_ID, error_msg)
+        await send_telegram_message(CREATOR_ID, error_msg, bot)
 
 # ===================== MAIN =====================
 def main():
     logger.info("🚀 Запуск бота...")
     init_db()
     clean_old_news()
+    
+    bot = Bot(token=TG_BOT_TOKEN)
+    
     if TEST_MODE:
         logger.info("🧪 ТЕСТОВЫЙ РЕЖИМ")
-        publish_new_post()
-        check_and_reply_to_comments()
-        check_creator_messages()
+        asyncio.run(publish_new_post(bot))
+        asyncio.run(check_and_reply_to_comments(bot))
+        asyncio.run(check_creator_messages(bot))
         return
+    
     now = datetime.now(IZHEVSK_TZ)
     hour = now.hour
-    logger.info(f"🕐 {now.strftime('%Y-%m-%d %H:%M:%S')}")
-    if hour in [9, 12, 18]:
-        publish_new_post()
+    logger.info(f"🕐 Текущее время по Ижевску: {now.strftime('%Y-%m-%d %H:%M:%S')}")
+    
+    # Часы публикации: 9, 10, 12, 14, 16, 18
+    if hour in [9, 10, 12, 14, 16, 18]:
+        logger.info(f"⏰ {hour}:00 — публикую пост!")
+        asyncio.run(publish_new_post(bot))
     else:
-        check_and_reply_to_comments()
-        check_creator_messages()
-    logger.info("✅ Готово")
+        logger.info(f"🕐 {hour}:00 — проверяю комментарии и сообщения создателя")
+        asyncio.run(check_and_reply_to_comments(bot))
+        asyncio.run(check_creator_messages(bot))
+    
+    logger.info("✅ Работа завершена")
 
 if __name__ == "__main__":
     main()
