@@ -567,6 +567,18 @@ async def publish_new_post(bot: Bot):
         await send_telegram_message(CREATOR_ID, error_msg, bot)
 
 # ===================== MAIN =====================
+async def run_all(bot: Bot):
+    await publish_new_post(bot)
+    await check_and_reply_to_comments(bot)
+    await check_creator_messages(bot)
+
+async def run_publish(bot: Bot):
+    await publish_new_post(bot)
+
+async def run_check(bot: Bot):
+    await check_and_reply_to_comments(bot)
+    await check_creator_messages(bot)
+
 def main():
     logger.info("🚀 Запуск бота...")
     init_db()
@@ -576,23 +588,19 @@ def main():
     
     if TEST_MODE:
         logger.info("🧪 ТЕСТОВЫЙ РЕЖИМ")
-        asyncio.run(publish_new_post(bot))
-        asyncio.run(check_and_reply_to_comments(bot))
-        asyncio.run(check_creator_messages(bot))
+        asyncio.run(run_all(bot))
         return
     
     now = datetime.now(IZHEVSK_TZ)
     hour = now.hour
     logger.info(f"🕐 Текущее время по Ижевску: {now.strftime('%Y-%m-%d %H:%M:%S')}")
     
-    # Часы публикации: 9, 10, 12, 14, 16, 18
     if hour in [9, 10, 12, 14, 16, 18]:
         logger.info(f"⏰ {hour}:00 — публикую пост!")
-        asyncio.run(publish_new_post(bot))
+        asyncio.run(run_publish(bot))
     else:
         logger.info(f"🕐 {hour}:00 — проверяю комментарии и сообщения создателя")
-        asyncio.run(check_and_reply_to_comments(bot))
-        asyncio.run(check_creator_messages(bot))
+        asyncio.run(run_check(bot))
     
     logger.info("✅ Работа завершена")
 
