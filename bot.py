@@ -8,22 +8,22 @@ import time
 import logging
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
-from huggingface_hub import InferenceClient
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
+from huggingface_hub import InferenceClient
 
 # ===================== НАСТРОЙКА ЛОГИРОВАНИЯ =====================
 logging.basicConfig(
-    format='%(asctime)s - %(levelname)s - %(message)s',
-    level=logging.INFO
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
 
 # ===================== КОНФИГУРАЦИЯ =====================
 HF_API_TOKEN = os.getenv("HF_API_TOKEN")
 TG_BOT_TOKEN = os.getenv("TG_BOT_TOKEN")
-TG_CHANNEL_ID = os.getenv("TG_CHAT_ID")           # ID канала (начинается с -100)
-TG_GROUP_ID = os.getenv("TG_GROUP_ID")            # ID группы обсуждения (если есть)
+TG_CHANNEL_ID = os.getenv("TG_CHAT_ID")
+TG_GROUP_ID = os.getenv("TG_GROUP_ID")
 CREATOR_ID = int(os.getenv("CREATOR_ID", "0"))
 PEXELS_API_KEY = os.getenv("PEXELS_API_KEY")
 
@@ -34,10 +34,11 @@ OFFSET_COMMENTS_FILE = "offset_comments.txt"
 OFFSET_CREATOR_FILE = "offset_creator.txt"
 IZHEVSK_TZ = ZoneInfo("Europe/Samara")
 
-# ID чата для комментариев (если группа не задана, используем канал)
 COMMENTS_CHAT_ID = TG_GROUP_ID if TG_GROUP_ID else TG_CHANNEL_ID
 
-# Приоритет источников
+# Максимальный возраст новости в днях (не старше 2 дней)
+MAX_NEWS_AGE_DAYS = 2
+
 SOURCE_PRIORITY = {
     "Habr": 1, "iXBT": 2, "3DNews": 3, "SecurityLab": 4,
     "vc.ru": 5, "Kod": 6, "CNews": 7, "Ferra": 8, "Overclockers": 9,
@@ -91,23 +92,14 @@ IMAGE_MODELS = [
     "CompVis/stable-diffusion-v1-4",
 ]
 
-# ===================== СЕССИЯ С RETRY =====================
+# ===================== HTTP СЕССИЯ С RETRY =====================
 def create_retry_session():
     session = requests.Session()
     retries = Retry(total=3, backoff_factor=1, status_forcelist=[500, 502, 503, 504])
     session.mount('https://', HTTPAdapter(max_retries=retries))
     return session
 
-session = create_retry_session()
-
-# ===================== ГЛОБАЛЬНЫЙ AI КЛИЕНТ =====================
-ai_client = None
-
-def get_ai_client():
-    global ai_client
-    if ai_client is None and HF_API_TOKEN:
-        ai_client = InferenceClient(api_key=HF_API_TOKEN, provider="auto")
-    return ai_client
+http_session = create_retry_session()
 
 # ===================== БАЗА ДАННЫХ =====================
 def init_db():
@@ -214,7 +206,23 @@ def save_creator_offset(offset):
     with open(OFFSET_CREATOR_FILE, "w") as f:
         f.write(str(offset))
 
-# ===================== НОВОСТИ =====================
+# ===================== НОВОСТИ С ФИЛЬТРАЦИЕЙ ПО ДАТЕ =====================
+def parse_rss_date(entry):
+    """Извлекает дату из записи RSS и возвращает datetime или None."""
+    if hasattr(entry, 'published_parsed') and entry.published_parsed:
+        return datetime.fromtimestamp(time.mktime(entry.published_parsed))
+    if hasattr(entry, 'updated_parsed') and entry.updated_parsed:
+        return datetime.fromtimestamp(time.mktime(entry.updated_parsed))
+    return None
+
+def is_fresh_news(entry):
+    pub_date = parse_rss_date(entry)
+    if pub_date is None:
+        return False
+    now = datetime.now()
+    age = now - pub_date
+    return age.days <= MAX_NEWS_AGE_DAYS
+
 def calculate_priority(news_item):
     source = news_item.get('source', '')
     source_priority = SOURCE_PRIORITY.get(source, 10)
@@ -228,12 +236,12 @@ def calculate_priority(news_item):
 def fetch_fresh_news(limit: int = 5):
     logger.info("📰 Запрашиваю свежие новости...")
     news_sources = [
-        {"name": "Habr", "url": "https://habr.com/ru/rss/feed/posts/?fl=ru"},
-        {"name": "3DNews", "url": "https://3dnews.ru/news/all/"},
-        {"name": "CNews", "url": "https://www.cnews.ru/rss/news/"},
-        {"name": "iXBT", "url": "https://www.ixbt.com/news.rss"},
-        {"name": "Ferra", "url": "https://ferra.ru/rss/news/"},
-        {"name": "SecurityLab", "url": "https://www.securitylab.ru/export/rss/"},
+        {"name": "Habr", "url": "https://habr.com/ru/rss/articles/?fl=ru"},
+        {"name": "3DNews", "url": "https://3dnews.ru/news/rss/"},
+        {"name": "CNews", "url": "https://www.cnews.ru/inc/rss/news.xml"},
+        {"name": "iXBT", "url": "https://www.ixbt.com/export/news.rss"},
+        {"name": "Ferra", "url": "https://www.ferra.ru/exports/rss.xml"},
+        {"name": "SecurityLab", "url": "https://www.securitylab.ru/_services/export/rss/vulnerabilities/"},
         {"name": "vc.ru", "url": "https://vc.ru/rss/"},
         {"name": "Kod", "url": "https://kod.ru/rss/"},
         {"name": "Overclockers", "url": "https://overclockers.ru/rss/news.rss"},
@@ -243,7 +251,9 @@ def fetch_fresh_news(limit: int = 5):
         try:
             logger.info(f"    - {source['name']}...")
             feed = feedparser.parse(source['url'])
-            for entry in feed.entries[:20]:
+            for entry in feed.entries[:30]:
+                if not is_fresh_news(entry):
+                    continue
                 link = entry.get('link')
                 if not link or is_news_already_published(link):
                     continue
@@ -256,7 +266,7 @@ def fetch_fresh_news(limit: int = 5):
                     'summary': summary
                 })
         except Exception as e:
-            logger.error(f"    ⚠️ Ошибка {source['name']}: {e}")
+            logger.warning(f"    ⚠️ Ошибка {source['name']}: {e}")
     if not all_candidates:
         logger.warning("⚠️ Новостей нет.")
         return []
@@ -275,12 +285,12 @@ def search_pexels_image(query: str) -> bytes | None:
     headers = {"Authorization": PEXELS_API_KEY}
     params = {"query": search_query, "per_page": 5, "orientation": "landscape"}
     try:
-        resp = session.get("https://api.pexels.com/v1/search", headers=headers, params=params, timeout=15)
+        resp = http_session.get("https://api.pexels.com/v1/search", headers=headers, params=params, timeout=15)
         if resp.status_code == 200:
             photos = resp.json().get("photos", [])
             if photos:
                 img_url = photos[0]["src"]["large"]
-                img_resp = session.get(img_url, timeout=30)
+                img_resp = http_session.get(img_url, timeout=30)
                 if img_resp.status_code == 200:
                     logger.info("✅ Изображение найдено на Pexels.")
                     return img_resp.content
@@ -305,7 +315,7 @@ def generate_image(prompt: str) -> bytes | None:
         try:
             logger.info(f"🔄 Пробую модель {model}...")
             url = f"https://api-inference.huggingface.co/models/{model}"
-            resp = session.post(url, headers=headers, json={"inputs": enhanced_prompt}, timeout=60)
+            resp = requests.post(url, headers=headers, json={"inputs": enhanced_prompt}, timeout=60)
             if resp.status_code == 200:
                 logger.info(f"✅ Изображение сгенерировано через {model}.")
                 return resp.content
@@ -316,41 +326,52 @@ def generate_image(prompt: str) -> bytes | None:
     return None
 
 # ===================== ОТПРАВКА В TELEGRAM =====================
-def send_telegram_photo(chat_id: int, photo_bytes: bytes, caption: str = None) -> tuple[bool, int | None]:
-    """Отправляет фото в чат. Возвращает (успех, message_id)."""
+def send_telegram_photo(chat_id: int, photo_bytes: bytes, caption: str) -> tuple[bool, int | None]:
+    MAX_CAPTION = 1024
     url = f"https://api.telegram.org/bot{TG_BOT_TOKEN}/sendPhoto"
     files = {"photo": ("image.png", photo_bytes, "image/png")}
-    data = {"chat_id": chat_id}
-    if caption:
-        data["caption"] = caption
-        data["parse_mode"] = "HTML"
-    try:
-        resp = session.post(url, files=files, data=data, timeout=30)
-        if resp.status_code == 200:
-            result = resp.json()
-            msg_id = result.get("result", {}).get("message_id")
-            logger.info(f"✅ Фото отправлено в чат {chat_id}, message_id={msg_id}")
-            return True, msg_id
-        else:
-            logger.error(f"❌ Ошибка отправки фото: {resp.text}")
+    
+    if len(caption) <= MAX_CAPTION:
+        data = {"chat_id": chat_id, "caption": caption, "parse_mode": "HTML"}
+        try:
+            resp = http_session.post(url, files=files, data=data, timeout=30)
+            if resp.status_code == 200:
+                result = resp.json()
+                message_id = result.get("result", {}).get("message_id")
+                logger.info(f"✅ Фото отправлено в чат {chat_id}, message_id={message_id}")
+                return True, message_id
+            else:
+                logger.error(f"❌ Ошибка отправки фото: {resp.text}")
+                return False, None
+        except Exception as e:
+            logger.error(f"❌ Исключение: {e}")
             return False, None
-    except Exception as e:
-        logger.error(f"❌ Исключение: {e}")
-        return False, None
+    else:
+        logger.info(f"⚠️ Подпись длиной {len(caption)} превышает лимит. Отправляю фото без подписи, текст отдельно.")
+        data_no_caption = {"chat_id": chat_id}
+        try:
+            resp_photo = http_session.post(url, files=files, data=data_no_caption, timeout=30)
+            if resp_photo.status_code != 200:
+                logger.error(f"❌ Ошибка отправки фото (без подписи): {resp_photo.text}")
+                return False, None
+            result = resp_photo.json()
+            message_id = result.get("result", {}).get("message_id")
+            logger.info(f"✅ Фото отправлено без подписи, message_id={message_id}")
+            success_text, _ = send_telegram_message(chat_id, caption)
+            return success_text, message_id
+        except Exception as e:
+            logger.error(f"❌ Исключение: {e}")
+            return False, None
 
-def send_telegram_message(chat_id: int, text: str, reply_to_message_id: int = None) -> tuple[bool, int | None]:
-    """Отправляет текст в чат. Возвращает (успех, message_id)."""
+def send_telegram_message(chat_id: int, text: str) -> tuple[bool, int | None]:
     url = f"https://api.telegram.org/bot{TG_BOT_TOKEN}/sendMessage"
-    payload = {"chat_id": chat_id, "text": text}
-    if reply_to_message_id:
-        payload["reply_to_message_id"] = reply_to_message_id
     try:
-        resp = session.post(url, json=payload, timeout=30)
+        resp = http_session.post(url, json={"chat_id": chat_id, "text": text, "parse_mode": "HTML"}, timeout=30)
         if resp.status_code == 200:
             result = resp.json()
-            msg_id = result.get("result", {}).get("message_id")
-            logger.info(f"✅ Сообщение отправлено в чат {chat_id}, message_id={msg_id}")
-            return True, msg_id
+            message_id = result.get("result", {}).get("message_id")
+            logger.info(f"✅ Сообщение отправлено в чат {chat_id}, message_id={message_id}")
+            return True, message_id
         else:
             logger.error(f"❌ Ошибка отправки сообщения: {resp.text}")
             return False, None
@@ -358,61 +379,58 @@ def send_telegram_message(chat_id: int, text: str, reply_to_message_id: int = No
         logger.error(f"❌ Исключение: {e}")
         return False, None
 
-def delete_telegram_message(chat_id: int, message_id: int) -> bool:
-    """Удаляет сообщение."""
-    url = f"https://api.telegram.org/bot{TG_BOT_TOKEN}/deleteMessage"
-    payload = {"chat_id": chat_id, "message_id": message_id}
-    try:
-        resp = session.post(url, json=payload, timeout=10)
-        if resp.status_code == 200:
-            logger.info(f"🗑️ Сообщение {message_id} удалено из чата {chat_id}")
-            return True
-        else:
-            logger.warning(f"⚠️ Не удалось удалить сообщение {message_id}: {resp.text}")
-            return False
-    except Exception as e:
-        logger.warning(f"⚠️ Ошибка при удалении: {e}")
-        return False
-
-def find_and_delete_duplicate_photo_in_group(photo_message_id: int, group_chat_id: int):
-    """
-    Ищет в группе обсуждения сообщение, которое является пересылкой из канала
-    с указанным message_id, и удаляет его.
-    """
-    if not group_chat_id:
+# ===================== УДАЛЕНИЕ ДУБЛИКАТА ФОТО ИЗ ГРУППЫ ОБСУЖДЕНИЯ =====================
+def delete_duplicate_from_group(photo_message_id: int, post_text: str):
+    if not TG_GROUP_ID:
         return
-    logger.info(f"🔍 Ищу дубликат фото (message_id={photo_message_id}) в группе {group_chat_id}...")
-    # Получаем последние несколько обновлений из группы
+    logger.info(f"🔍 Ищу дубликат фото (message_id={photo_message_id}) в группе {TG_GROUP_ID}...")
+    time.sleep(5)
     url = f"https://api.telegram.org/bot{TG_BOT_TOKEN}/getUpdates"
-    params = {"timeout": 5, "allowed_updates": ["message"]}
+    params = {"offset": get_comments_offset(), "timeout": 5, "allowed_updates": ["message"]}
     try:
-        resp = session.get(url, params=params, timeout=10)
+        resp = http_session.get(url, params=params, timeout=10)
         data = resp.json()
         if not data.get("ok"):
+            logger.warning(f"Не удалось получить обновления: {data}")
             return
+        max_id = get_comments_offset() - 1
         for update in data.get("result", []):
+            update_id = update.get("update_id")
+            if update_id > max_id:
+                max_id = update_id
             msg = update.get("message")
             if not msg:
                 continue
-            if msg.get("chat", {}).get("id") != group_chat_id:
+            chat_id = msg.get("chat", {}).get("id")
+            if str(chat_id) != str(TG_GROUP_ID):
                 continue
-            # Проверяем, является ли сообщение пересылкой из канала
-            forward_from_message_id = msg.get("forward_from_message_id")
-            if forward_from_message_id == photo_message_id:
-                # Нашли дубликат
-                delete_telegram_message(group_chat_id, msg["message_id"])
-                break
+            if msg.get("photo") and not msg.get("reply_to_message"):
+                caption = msg.get("caption", "")
+                if caption and post_text.startswith(caption[:50]):
+                    logger.info(f"Найден дубликат фото в группе, message_id={msg['message_id']}")
+                    del_url = f"https://api.telegram.org/bot{TG_BOT_TOKEN}/deleteMessage"
+                    del_payload = {"chat_id": TG_GROUP_ID, "message_id": msg["message_id"]}
+                    del_resp = http_session.post(del_url, json=del_payload, timeout=5)
+                    if del_resp.status_code == 200:
+                        logger.info("✅ Дубликат фото удалён из группы обсуждения.")
+                    else:
+                        logger.warning(f"❌ Не удалось удалить дубликат: {del_resp.text}")
+                    break
+        if max_id >= get_comments_offset():
+            save_comments_offset(max_id + 1)
     except Exception as e:
-        logger.error(f"❌ Ошибка при поиске дубликата: {e}")
+        logger.warning(f"⚠️ Ошибка при удалении дубликата: {e}")
 
-# ===================== ГЕНЕРАЦИЯ ТЕКСТА =====================
+# ===================== ГЕНЕРАЦИЯ ТЕКСТА (ЕДИНЫЙ КЛИЕНТ) =====================
+ai_client = None
+
 def generate_post(news_list):
+    global ai_client
     logger.info("🤖 Генерирую пост...")
     if not HF_API_TOKEN:
         return "❌ Ошибка: нет токена HF"
-    client = get_ai_client()
-    if not client:
-        return "❌ Ошибка: AI клиент не создан"
+    if ai_client is None:
+        ai_client = InferenceClient(api_key=HF_API_TOKEN, provider="auto")
     random_greeting = random.choice(GREETINGS)
     random_closing = random.choice(CLOSINGS)
     news_context = "\n\n".join([
@@ -430,7 +448,7 @@ def generate_post(news_list):
     for model in FALLBACK_MODELS:
         try:
             logger.info(f"🔄 Пробую модель: {model}")
-            completion = client.chat.completions.create(
+            completion = ai_client.chat.completions.create(
                 model=model,
                 messages=[{"role": "user", "content": prompt}],
                 max_tokens=800,
@@ -446,17 +464,17 @@ def generate_post(news_list):
     return "❌ Не удалось сгенерировать пост."
 
 def generate_reply(comment_text: str, post_content: str) -> str:
+    global ai_client
     prompt = f"""
 Ты — автор IT-канала. Подписчик: "{comment_text}"
 Пост был о: {post_content[:500]}
 Ответь дружелюбно, с юмором (2-3 предложения). Если про Max — легкая ирония.
 """
-    client = get_ai_client()
-    if not client:
-        return None
     for model in FALLBACK_MODELS:
         try:
-            completion = client.chat.completions.create(
+            if ai_client is None:
+                ai_client = InferenceClient(api_key=HF_API_TOKEN, provider="auto")
+            completion = ai_client.chat.completions.create(
                 model=model,
                 messages=[{"role": "user", "content": prompt}],
                 max_tokens=200,
@@ -469,7 +487,7 @@ def generate_reply(comment_text: str, post_content: str) -> str:
             continue
     return None
 
-# ===================== КОММЕНТАРИИ И СООБЩЕНИЯ СОЗДАТЕЛЯ =====================
+# ===================== КОММЕНТАРИИ =====================
 def check_and_reply_to_comments():
     logger.info("💬 Проверяю комментарии...")
     last_post = get_last_post()
@@ -479,7 +497,7 @@ def check_and_reply_to_comments():
     url = f"https://api.telegram.org/bot{TG_BOT_TOKEN}/getUpdates"
     params = {"offset": offset, "timeout": 30, "allowed_updates": ["message"]}
     try:
-        resp = session.get(url, params=params, timeout=35)
+        resp = http_session.get(url, params=params, timeout=35)
         data = resp.json()
         if not data.get("ok"):
             return
@@ -506,7 +524,7 @@ def check_and_reply_to_comments():
             logger.info(f"📝 Комментарий: {text[:50]}...")
             reply = generate_reply(text, last_post['content'])
             if reply:
-                send_telegram_message(chat_id, reply, reply_to_message_id=comment_id)
+                send_telegram_message(chat_id, reply)
                 mark_comment_processed(comment_id, last_post['id'])
         if max_id >= offset:
             save_comments_offset(max_id + 1)
@@ -519,7 +537,7 @@ def check_creator_messages():
     url = f"https://api.telegram.org/bot{TG_BOT_TOKEN}/getUpdates"
     params = {"offset": offset, "timeout": 30}
     try:
-        resp = session.get(url, params=params, timeout=35)
+        resp = http_session.get(url, params=params, timeout=35)
         data = resp.json()
         if not data.get("ok"):
             return
@@ -546,7 +564,7 @@ def check_creator_messages():
     except Exception as e:
         logger.error(f"❌ Ошибка: {e}")
 
-# ===================== ПУБЛИКАЦИЯ ПОСТА С УДАЛЕНИЕМ ДУБЛИКАТА ФОТО =====================
+# ===================== ПУБЛИКАЦИЯ =====================
 def publish_new_post():
     logger.info("📝 Публикация нового поста...")
     try:
@@ -560,38 +578,30 @@ def publish_new_post():
         if not post_content or post_content.startswith("❌"):
             send_telegram_message(CREATOR_ID, f"❌ Ошибка генерации: {post_content}")
             return
-
-        # 1. Отправляем фото (если есть) в канал
-        photo_message_id = None
         image = search_pexels_image(top_news['title'])
         if not image and HF_API_TOKEN:
             image = generate_image(f"{top_news['title']} {top_news['summary']}")
         if image:
-            # Отправляем фото без подписи (подпись будет отдельным сообщением, чтобы избежать дублирования в группе)
-            success, msg_id = send_telegram_photo(TG_CHANNEL_ID, image)
+            success, msg_id = send_telegram_photo(TG_CHANNEL_ID, image, post_content)
             if success and msg_id:
-                photo_message_id = msg_id
-                logger.info(f"Фото отправлено, message_id={photo_message_id}")
-                # Небольшая задержка, чтобы дубликат успел появиться в группе
-                time.sleep(2)
-                # Удаляем дубликат фото из группы обсуждения, если группа задана
-                if TG_GROUP_ID and photo_message_id:
-                    find_and_delete_duplicate_photo_in_group(photo_message_id, TG_GROUP_ID)
+                logger.info(f"Фото отправлено, message_id={msg_id}")
+                delete_duplicate_from_group(msg_id, post_content)
+                save_post(msg_id, post_content)
+                for news in news_list:
+                    save_published_news(news['link'], news['title'])
+                send_telegram_message(CREATOR_ID, "✅ Пост опубликован!")
             else:
-                logger.warning("Не удалось отправить фото, продолжаем с текстом")
+                send_telegram_message(CREATOR_ID, "❌ Ошибка публикации фото.")
         else:
-            logger.info("Изображение не получено, отправляем только текст")
-
-        # 2. Отправляем текст поста отдельным сообщением (можно с подписью, но без фото)
-        success_text, text_msg_id = send_telegram_message(TG_CHANNEL_ID, post_content)
-        if success_text:
-            # Сохраняем именно текстовое сообщение как пост (для ответов на комментарии)
-            save_post(text_msg_id, post_content)
-            for news in news_list:
-                save_published_news(news['link'], news['title'])
-            send_telegram_message(CREATOR_ID, "✅ Пост опубликован!")
-        else:
-            send_telegram_message(CREATOR_ID, "❌ Ошибка публикации текста поста.")
+            logger.info("⚠️ Не удалось получить изображение, отправляю только текст.")
+            success, msg_id = send_telegram_message(TG_CHANNEL_ID, post_content)
+            if success and msg_id:
+                save_post(msg_id, post_content)
+                for news in news_list:
+                    save_published_news(news['link'], news['title'])
+                send_telegram_message(CREATOR_ID, "✅ Пост опубликован (без фото).")
+            else:
+                send_telegram_message(CREATOR_ID, "❌ Ошибка публикации текста.")
     except Exception as e:
         error_msg = f"❌ Критическая ошибка: {str(e)}"
         logger.error(error_msg)
@@ -602,8 +612,6 @@ def main():
     logger.info("🚀 Запуск бота...")
     init_db()
     clean_old_news()
-    # Инициализируем AI клиент один раз
-    get_ai_client()
     if TEST_MODE:
         logger.info("🧪 ТЕСТОВЫЙ РЕЖИМ")
         publish_new_post()
