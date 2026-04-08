@@ -610,7 +610,7 @@ def main():
     hour = now.hour
     logger.info(f"🕐 Текущее время по Ижевску: {now.strftime('%Y-%m-%d %H:%M:%S')}")
     
-    if hour in [9, 10, 12, 14, 16, 18]:
+    if hour in [9, 10, 12, 14, 16, 18, 1]:
         logger.info(f"⏰ {hour}:00 — публикую пост!")
         asyncio.run(run_publish(bot))
     else:
