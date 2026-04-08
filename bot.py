@@ -98,9 +98,9 @@ FALLBACK_MODELS = [
 ]
 
 IMAGE_MODELS = [
-    "black-forest-labs/FLUX.1-dev",
-    "stabilityai/stable-diffusion-2-1",
-    "CompVis/stable-diffusion-v1-4",
+    "cutycat2000/InterDiffusion-2.5",
+    "cutycat2000x/InterDiffusion-3.5",
+    "cutycat2000x/InterDiffusion-4.04",
 ]
 
 # ===================== HTTP СЕССИЯ С RETRY =====================
