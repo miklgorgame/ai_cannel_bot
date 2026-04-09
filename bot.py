@@ -618,7 +618,7 @@ def main():
     bot = Bot(token=TG_BOT_TOKEN)
     
     if TEST_MODE:
-        logger.info("🧪 ТЕСТОВЫЙ РЕЖИМ")
+        logger.info("🧪 ТЕСТОВЫЙ РЕЖИМ: публикую пост, затем проверяю комментарии и команды")
         asyncio.run(run_all(bot))
         return
     
@@ -626,14 +626,14 @@ def main():
     hour = now.hour
     logger.info(f"🕐 Текущее время по Ижевску: {now.strftime('%Y-%m-%d %H:%M:%S')}")
     
-    if hour in [9, 10, 12, 14, 16, 18, 1]:
-        logger.info(f"⏰ {hour}:00 — публикую пост!")
-        asyncio.run(run_publish(bot))
+    # В часы публикации: сначала пост, потом комментарии
+    if hour in [9, 10, 12, 14, 16, 18]:
+        logger.info(f"⏰ {hour}:00 — публикую пост, затем проверяю комментарии и команды")
+        asyncio.run(run_all(bot))  # <-- Теперь и публикует, и проверяет!
     else:
         logger.info(f"🕐 {hour}:00 — проверяю комментарии и сообщения создателя")
         asyncio.run(run_check(bot))
     
     logger.info("✅ Работа завершена")
-
 if __name__ == "__main__":
     main()
