@@ -460,56 +460,72 @@ def generate_reply(comment_text: str, post_content: str) -> str:
 
 # ===================== КОММЕНТАРИИ И КОМАНДЫ =====================
 async def check_and_reply_to_comments(bot: Bot):
-    logger.info("💬 Проверяю комментарии (включая старые)...")
+    logger.info("💬 Проверяю комментарии (беру последние 100 сообщений)...")
     last_post = get_last_post()
     if not last_post:
         logger.info("Нет постов для проверки комментариев.")
         return
-    
-    # Получаем последние 100 обновлений (без offset, чтобы увидеть все)
+
+    # Указываем chat_id, чтобы получать сообщения только из нужного чата (группы или канала)
+    target_chat_id = COMMENTS_CHAT_ID
+    if not target_chat_id:
+        logger.error("Не задан TG_GROUP_ID или TG_CHAT_ID для комментариев.")
+        return
+
     try:
-        updates = await bot.get_updates(offset=-1, limit=100, timeout=10, allowed_updates=["message"])
+        # Запрашиваем последние 100 сообщений из нужного чата
+        # Важно: метод getUpdates не поддерживает фильтрацию по chat_id.
+        # Поэтому мы всё равно получаем обновления из всех чатов, где есть бот.
+        # Альтернатива: использовать bot.get_updates() без параметров, а потом фильтровать.
+        updates = await bot.get_updates(limit=100, timeout=10, allowed_updates=["message"])
     except Exception as e:
         logger.error(f"Ошибка получения обновлений: {e}")
         return
-    
-    logger.info(f"Получено {len(updates)} обновлений.")
+
+    logger.info(f"Получено {len(updates)} обновлений. Ищу ответы на пост {last_post['message_id']} в чате {target_chat_id}.")
     processed_count = 0
     for update in updates:
         msg = update.message
         if not msg:
             continue
-        
-        # Проверяем, что сообщение из нужного чата (группа или канал)
-        chat_id = msg.chat_id
-        if COMMENTS_CHAT_ID and str(chat_id) != str(COMMENTS_CHAT_ID):
+
+        # 1. Проверяем, что сообщение из нужного чата
+        if msg.chat_id != target_chat_id:
             continue
-        
-        # Проверяем, что это ответ на наш пост
+
+        # 2. Проверяем, что это ответ на сообщение
         reply_to = msg.reply_to_message
-        if not reply_to or reply_to.message_id != last_post['message_id']:
+        if not reply_to:
             continue
-        
+
+        # 3. Проверяем, что отвечают именно на последний пост бота
+        if reply_to.message_id != last_post['message_id']:
+            continue
+
+        # 4. Проверяем, не отвечали ли уже на этот комментарий
         comment_id = msg.message_id
         if is_comment_processed(comment_id):
             continue
-        
-        text = msg.text
-        if not text:
+
+        comment_text = msg.text
+        if not comment_text:
             continue
+
+        logger.info(f"📝 Новый комментарий (ID={comment_id}) от @{msg.from_user.username or msg.from_user.first_name}: {comment_text[:50]}...")
         
-        logger.info(f"📝 Найден комментарий (ID={comment_id}): {text[:50]}...")
-        reply = generate_reply(text, last_post['content'])
-        if reply:
-            await send_telegram_message(chat_id, reply, bot)
+        # Генерируем и отправляем ответ
+        reply_text = generate_reply(comment_text, last_post['content'])
+        if reply_text:
+            await send_telegram_message(target_chat_id, reply_text, bot)
             mark_comment_processed(comment_id, last_post['id'])
             processed_count += 1
             logger.info(f"✅ Ответ отправлен на комментарий {comment_id}")
         else:
-            logger.warning(f"Не удалось сгенерировать ответ на комментарий {comment_id}")
-            mark_comment_processed(comment_id, last_post['id'])  # чтобы не пытаться снова
-    
-    logger.info(f"Обработано комментариев: {processed_count}")
+            logger.warning(f"⚠️ Не удалось сгенерировать ответ на комментарий {comment_id}")
+            # Отмечаем как обработанный, чтобы не пытаться снова
+            mark_comment_processed(comment_id, last_post['id'])
+
+    logger.info(f"Обработано новых комментариев: {processed_count}")
 
 async def check_creator_messages(bot: Bot):
     logger.info("👤 Проверяю сообщения создателя...")
