@@ -37,19 +37,14 @@ OFFSET_COMMENTS_FILE = "offset_comments.txt"
 OFFSET_CREATOR_FILE = "offset_creator.txt"
 IZHEVSK_TZ = ZoneInfo("Europe/Samara")
 
-COMMENTS_CHAT_ID = TG_GROUP_ID if TG_GROUP_ID else TG_CHANNEL_ID
+# Чат для комментариев (группа обсуждения)
+COMMENTS_CHAT_ID = int(TG_GROUP_ID) if TG_GROUP_ID else (int(TG_CHANNEL_ID) if TG_CHANNEL_ID else None)
+
 MAX_NEWS_AGE_DAYS = 2
 
 SOURCE_PRIORITY = {
-    "Habr": 1,
-    "iXBT": 2,
-    "3DNews": 3,
-    "SecurityLab": 4,
-    "vc.ru": 5,
-    "Kod": 6,
-    "CNews": 7,
-    "Ferra": 8,
-    "Overclockers": 9,
+    "Habr": 1, "iXBT": 2, "3DNews": 3, "SecurityLab": 4,
+    "vc.ru": 5, "Kod": 6, "CNews": 7, "Ferra": 8, "Overclockers": 9,
 }
 
 KEYWORDS = [
@@ -59,11 +54,8 @@ KEYWORDS = [
 ]
 
 GREETINGS = [
-    "Привет, друзья! 👋",
-    "Здравствуйте, уважаемые подписчики! 💻",
-    "Всем привет! 🤗",
-    "Доброго времени суток! 🌞",
-    "Приветствую, IT-энтузиасты! 🚀"
+    "Привет, друзья! 👋", "Здравствуйте, уважаемые подписчики! 💻",
+    "Всем привет! 🤗", "Доброго времени суток! 🌞", "Приветствую, IT-энтузиасты! 🚀"
 ]
 
 CLOSINGS = [
@@ -97,13 +89,14 @@ FALLBACK_MODELS = [
     "mistralai/Mistral-7B-Instruct-v0.3"
 ]
 
+# Список моделей из второй версии (более актуальные)
 IMAGE_MODELS = [
     "cutycat2000/InterDiffusion-2.5",
     "cutycat2000x/InterDiffusion-3.5",
     "cutycat2000x/InterDiffusion-4.04",
 ]
 
-# ===================== HTTP СЕССИЯ С RETRY =====================
+# ===================== HTTP СЕССИЯ ДЛЯ НОВОСТЕЙ И PEXELS =====================
 def create_retry_session():
     session = requests.Session()
     retries = Retry(total=3, backoff_factor=1, status_forcelist=[500, 502, 503, 504])
@@ -127,6 +120,7 @@ def init_db():
                  (comment_id INTEGER PRIMARY KEY, post_id INTEGER, replied BOOLEAN)''')
     conn.commit()
     conn.close()
+    logger.info("✅ База данных инициализирована.")
 
 def save_post(message_id: int, content: str):
     conn = sqlite3.connect(DB_FILE)
@@ -136,22 +130,24 @@ def save_post(message_id: int, content: str):
               (message_id, content, created_at))
     conn.commit()
     conn.close()
+    logger.info(f"💾 Пост сохранён в БД: message_id={message_id}")
 
-def get_last_post():
+def get_last_posts(limit: int = 5):
+    """Возвращает последние N постов."""
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
-    c.execute("SELECT id, message_id, content, created_at FROM posts ORDER BY created_at DESC LIMIT 1")
-    row = c.fetchone()
+    c.execute("SELECT id, message_id, content, created_at FROM posts ORDER BY created_at DESC LIMIT ?", (limit,))
+    rows = c.fetchall()
     conn.close()
-    if row:
-        return {"id": row[0], "message_id": row[1], "content": row[2], "created_at": row[3]}
-    return None
+    return [{"id": r[0], "message_id": r[1], "content": r[2], "created_at": r[3]} for r in rows]
 
 def is_comment_processed(comment_id: int) -> bool:
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
     c.execute("SELECT 1 FROM processed_comments WHERE comment_id = ?", (comment_id,))
-    return c.fetchone() is not None
+    result = c.fetchone() is not None
+    conn.close()
+    return result
 
 def mark_comment_processed(comment_id: int, post_id: int):
     conn = sqlite3.connect(DB_FILE)
@@ -160,12 +156,15 @@ def mark_comment_processed(comment_id: int, post_id: int):
               (comment_id, post_id, True))
     conn.commit()
     conn.close()
+    logger.info(f"✅ Комментарий {comment_id} помечен как обработанный.")
 
 def is_news_already_published(link: str) -> bool:
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
     c.execute("SELECT 1 FROM published_news WHERE link = ?", (link,))
-    return c.fetchone() is not None
+    result = c.fetchone() is not None
+    conn.close()
+    return result
 
 def save_published_news(link: str, title: str):
     conn = sqlite3.connect(DB_FILE)
@@ -183,6 +182,7 @@ def clean_old_news(days: int = 7):
     c.execute("DELETE FROM published_news WHERE published_at < ?", (cutoff,))
     conn.commit()
     conn.close()
+    logger.info(f"🧹 Удалены старые новости старше {days} дней.")
 
 def get_recent_posts(limit: int = 10):
     conn = sqlite3.connect(DB_FILE)
@@ -192,7 +192,7 @@ def get_recent_posts(limit: int = 10):
     conn.close()
     return [{"id": r[0], "message_id": r[1], "content": r[2][:100], "created_at": r[3]} for r in rows]
 
-# ===================== OFFSET ДЛЯ КОММЕНТАРИЕВ И КОМАНД =====================
+# ===================== УПРАВЛЕНИЕ OFFSET =====================
 def get_comments_offset():
     if os.path.exists(OFFSET_COMMENTS_FILE):
         with open(OFFSET_COMMENTS_FILE, "r") as f:
@@ -202,6 +202,7 @@ def get_comments_offset():
 def save_comments_offset(offset):
     with open(OFFSET_COMMENTS_FILE, "w") as f:
         f.write(str(offset))
+    logger.info(f"💾 Сохранён offset комментариев: {offset}")
 
 def get_creator_offset():
     if os.path.exists(OFFSET_CREATOR_FILE):
@@ -212,8 +213,9 @@ def get_creator_offset():
 def save_creator_offset(offset):
     with open(OFFSET_CREATOR_FILE, "w") as f:
         f.write(str(offset))
+    logger.info(f"💾 Сохранён offset создателя: {offset}")
 
-# ===================== НОВОСТИ С ПРАВИЛЬНЫМИ RSS =====================
+# ===================== НОВОСТИ =====================
 def parse_rss_date(entry):
     if hasattr(entry, 'published_parsed') and entry.published_parsed:
         return datetime.fromtimestamp(time.mktime(entry.published_parsed))
@@ -241,7 +243,6 @@ def calculate_priority(news_item):
 
 def fetch_fresh_news(limit: int = 5):
     logger.info("📰 Запрашиваю свежие новости...")
-    # Правильные RSS-ссылки
     news_sources = [
         {"name": "Habr", "url": "https://habr.com/ru/rss/articles/?fl=ru"},
         {"name": "3DNews", "url": "https://3dnews.ru/news/rss/"},
@@ -332,7 +333,7 @@ def generate_image(prompt: str) -> bytes | None:
             logger.warning(f"⚠️ Ошибка с моделью {model}: {e}")
     return None
 
-# ===================== АСИНХРОННЫЕ ФУНКЦИИ TELEGRAM =====================
+# ===================== ОТПРАВКА В TELEGRAM =====================
 async def send_telegram_photo(chat_id: int, photo_bytes: bytes, caption: str, bot: Bot) -> tuple[bool, int | None]:
     MAX_CAPTION = 1024
     if len(caption) <= MAX_CAPTION:
@@ -360,11 +361,14 @@ async def send_telegram_message(chat_id: int, text: str, bot: Bot) -> tuple[bool
         logger.error(f"Ошибка отправки сообщения: {e}")
         return False, None
 
+# ===================== УДАЛЕНИЕ ДУБЛИКАТА ФОТО ИЗ ГРУППЫ =====================
 async def delete_duplicate_from_group(photo_message_id: int, post_text: str, bot: Bot):
     if not TG_GROUP_ID:
+        logger.info("TG_GROUP_ID не задан, пропускаем удаление дубликатов.")
         return
     logger.info(f"🔍 Ищу дубликат фото (message_id={photo_message_id}) в группе {TG_GROUP_ID}...")
     await asyncio.sleep(5)
+    # Используем offset комментариев, чтобы не перечитывать всё заново
     offset = get_comments_offset()
     try:
         updates = await bot.get_updates(offset=offset, timeout=5, allowed_updates=["message"])
@@ -384,7 +388,7 @@ async def delete_duplicate_from_group(photo_message_id: int, post_text: str, bot
                     try:
                         await bot.delete_message(chat_id=TG_GROUP_ID, message_id=msg.message_id)
                         logger.info("✅ Дубликат фото удалён из группы обсуждения.")
-                    except TelegramError as e:
+                    except Exception as e:
                         logger.warning(f"Не удалось удалить дубликат: {e}")
                     break
         if max_id >= offset:
@@ -458,37 +462,31 @@ def generate_reply(comment_text: str, post_content: str) -> str:
             continue
     return None
 
-# ===================== КОММЕНТАРИИ И КОМАНДЫ =====================
-
-def get_last_posts(limit: int = 5):
-    """Возвращает последние N постов."""
-    conn = sqlite3.connect(DB_FILE)
-    c = conn.cursor()
-    c.execute("SELECT id, message_id, content, created_at FROM posts ORDER BY created_at DESC LIMIT ?", (limit,))
-    rows = c.fetchall()
-    conn.close()
-    return [{"id": r[0], "message_id": r[1], "content": r[2], "created_at": r[3]} for r in rows]
-
+# ===================== ПРОВЕРКА КОММЕНТАРИЕВ (С OFFSET, 5 ПОСТОВ) =====================
 async def check_and_reply_to_comments(bot: Bot):
-    """Проверяет комментарии к последним 5 постам."""
     logger.info("💬 Проверяю комментарии к последним 5 постам...")
     
-    last_posts = get_last_posts(limit=5)  # получаем последние 5 постов
+    last_posts = get_last_posts(limit=5)
     if not last_posts:
         logger.info("Нет постов для проверки комментариев.")
         return
     
     post_ids = {post['message_id']: post for post in last_posts}
-    logger.info(f"Ищу ответы на посты: {list(post_ids.keys())}")
+    logger.info(f"Ожидаемые ID постов: {list(post_ids.keys())}")
+    
+    offset = get_comments_offset()
+    logger.info(f"Текущий offset комментариев: {offset}")
     
     try:
-        # Получаем последние 100 сообщений без offset (чтобы увидеть всё)
-        updates = await bot.get_updates(limit=100, timeout=10, allowed_updates=["message"])
+        updates = await bot.get_updates(offset=offset, limit=100, timeout=10, allowed_updates=["message"])
     except Exception as e:
         logger.error(f"Ошибка получения обновлений: {e}")
         return
     
-    # Диагностика: какие чаты видны боту
+    max_id = offset - 1
+    processed_count = 0
+    
+    # Диагностика видимых чатов
     seen_chats = set()
     for update in updates:
         if update.message:
@@ -504,22 +502,23 @@ async def check_and_reply_to_comments(bot: Bot):
     else:
         logger.warning("COMMENTS_CHAT_ID не задан! Проверьте TG_GROUP_ID или TG_CHAT_ID")
     
-    processed_count = 0
     for update in updates:
+        if update.update_id > max_id:
+            max_id = update.update_id
+        
         msg = update.message
         if not msg:
             continue
         
-        # Фильтр по чату (если задан)
+        # Фильтр по нужному чату
         if COMMENTS_CHAT_ID and msg.chat_id != COMMENTS_CHAT_ID:
             continue
         
-        # Проверяем, что это ответ на сообщение
+        # Ответ на сообщение
         reply_to = msg.reply_to_message
         if not reply_to:
             continue
         
-        # Проверяем, что отвечают на один из наших последних постов
         replied_post = post_ids.get(reply_to.message_id)
         if not replied_post:
             continue
@@ -537,20 +536,36 @@ async def check_and_reply_to_comments(bot: Bot):
         
         reply_text = generate_reply(comment_text, replied_post['content'])
         if reply_text:
-            await send_telegram_message(msg.chat_id, reply_text, bot)
-            mark_comment_processed(comment_id, replied_post['id'])
-            processed_count += 1
+            try:
+                await bot.send_message(
+                    chat_id=msg.chat_id,
+                    text=reply_text,
+                    reply_to_message_id=comment_id,
+                    parse_mode="HTML"
+                )
+                logger.info(f"✅ Отправлен ответ на комментарий {comment_id}")
+                # ТОЛЬКО при успешной отправке помечаем как обработанный
+                mark_comment_processed(comment_id, replied_post['id'])
+                processed_count += 1
+            except Exception as e:
+                logger.error(f"Не удалось отправить ответ: {e}")
+                # НЕ помечаем – пусть попробует в следующий раз
         else:
             logger.warning(f"Не удалось сгенерировать ответ на комментарий {comment_id}")
-            mark_comment_processed(comment_id, replied_post['id'])
+            # НЕ помечаем – возможно, модель временно недоступна
+    
+    # Сохраняем новый offset
+    if max_id >= offset:
+        save_comments_offset(max_id + 1)
     
     logger.info(f"Обработано новых комментариев: {processed_count}")
 
+# ===================== КОМАНДЫ СОЗДАТЕЛЯ =====================
 async def check_creator_messages(bot: Bot):
     logger.info("👤 Проверяю сообщения создателя...")
     offset = get_creator_offset()
     try:
-        updates = await bot.get_updates(offset=offset, timeout=30)
+        updates = await bot.get_updates(offset=offset, timeout=30, allowed_updates=["message"])
         max_id = offset - 1
         for update in updates:
             if update.update_id > max_id:
@@ -591,7 +606,7 @@ async def publish_new_post(bot: Bot):
         if not image and HF_API_TOKEN:
             image = generate_image(f"{top_news['title']} {top_news['summary']}")
         if image:
-            success, msg_id = await send_telegram_photo(TG_CHANNEL_ID, image, post_content, bot)
+            success, msg_id = await send_telegram_photo(int(TG_CHANNEL_ID), image, post_content, bot)
             if success and msg_id:
                 logger.info(f"Фото отправлено, message_id={msg_id}")
                 await delete_duplicate_from_group(msg_id, post_content, bot)
@@ -603,7 +618,7 @@ async def publish_new_post(bot: Bot):
                 await send_telegram_message(CREATOR_ID, "❌ Ошибка публикации фото.", bot)
         else:
             logger.info("⚠️ Не удалось получить изображение, отправляю только текст.")
-            success, msg_id = await send_telegram_message(TG_CHANNEL_ID, post_content, bot)
+            success, msg_id = await send_telegram_message(int(TG_CHANNEL_ID), post_content, bot)
             if success and msg_id:
                 save_post(msg_id, post_content)
                 for news in news_list:
@@ -618,6 +633,7 @@ async def publish_new_post(bot: Bot):
 
 # ===================== MAIN =====================
 async def run_all(bot: Bot):
+    logger.info("🔄 Выполняю все задачи: публикация + комментарии + команды")
     await publish_new_post(bot)
     await check_and_reply_to_comments(bot)
     await check_creator_messages(bot)
@@ -645,14 +661,14 @@ def main():
     hour = now.hour
     logger.info(f"🕐 Текущее время по Ижевску: {now.strftime('%Y-%m-%d %H:%M:%S')}")
     
-    # В часы публикации: сначала пост, потом комментарии
     if hour in [9, 10, 12, 14, 16, 18]:
         logger.info(f"⏰ {hour}:00 — публикую пост, затем проверяю комментарии и команды")
-        asyncio.run(run_all(bot))  # <-- Теперь и публикует, и проверяет!
+        asyncio.run(run_all(bot))
     else:
         logger.info(f"🕐 {hour}:00 — проверяю комментарии и сообщения создателя")
         asyncio.run(run_check(bot))
     
     logger.info("✅ Работа завершена")
+
 if __name__ == "__main__":
     main()
