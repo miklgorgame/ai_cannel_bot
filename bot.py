@@ -459,6 +459,16 @@ def generate_reply(comment_text: str, post_content: str) -> str:
     return None
 
 # ===================== КОММЕНТАРИИ И КОМАНДЫ =====================
+
+def get_last_posts(limit: int = 5):
+    """Возвращает последние N постов."""
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    c.execute("SELECT id, message_id, content, created_at FROM posts ORDER BY created_at DESC LIMIT ?", (limit,))
+    rows = c.fetchall()
+    conn.close()
+    return [{"id": r[0], "message_id": r[1], "content": r[2], "created_at": r[3]} for r in rows]
+
 async def check_and_reply_to_comments(bot: Bot):
     """Проверяет комментарии к последним 5 постам."""
     logger.info("💬 Проверяю комментарии к последним 5 постам...")
