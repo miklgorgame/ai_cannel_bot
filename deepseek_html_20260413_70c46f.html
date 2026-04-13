@@ -1,0 +1,493 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>GitHub Actions Dashboard</title>
+    <style>
+        * { box-sizing: border-box; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            max-width: 1200px;
+            margin: 20px auto;
+            padding: 0 20px;
+            background: #f6f8fa;
+        }
+        .container { background: white; border-radius: 8px; padding: 20px; box-shadow: 0 1px 3px rgba(0,0,0,0.1); margin-bottom: 20px; }
+        h2 { margin-top: 0; color: #24292f; border-bottom: 1px solid #d0d7de; padding-bottom: 8px; }
+        label { display: block; margin-bottom: 6px; font-weight: 600; color: #24292f; }
+        input, select, button { padding: 8px 12px; border: 1px solid #d0d7de; border-radius: 6px; font-size: 14px; }
+        button {
+            background: #2da44e;
+            color: white;
+            border: none;
+            cursor: pointer;
+            font-weight: 600;
+            margin-right: 8px;
+            margin-bottom: 8px;
+        }
+        button.danger { background: #cf222e; }
+        button.secondary { background: #f6f8fa; color: #24292f; border: 1px solid #d0d7de; }
+        button:disabled { opacity: 0.6; cursor: not-allowed; }
+        .token-section {
+            background: #fff8c5;
+            border: 1px solid #d4a72c;
+            padding: 15px;
+            border-radius: 6px;
+            margin-bottom: 20px;
+        }
+        .token-warning { color: #9a6700; font-size: 0.9em; margin-top: 5px; }
+        .flex-row { display: flex; gap: 10px; align-items: flex-end; flex-wrap: wrap; }
+        .flex-row > * { flex: 1 1 200px; }
+        .workflow-item, .run-item {
+            border: 1px solid #d0d7de;
+            border-radius: 6px;
+            padding: 12px;
+            margin-bottom: 12px;
+            background: #ffffff;
+        }
+        .run-header { display: flex; justify-content: space-between; align-items: center; }
+        .status-badge {
+            padding: 4px 8px;
+            border-radius: 20px;
+            font-size: 12px;
+            font-weight: 600;
+        }
+        .status-queued { background: #ddf4ff; color: #0969da; }
+        .status-in_progress { background: #fff8c5; color: #9a6700; }
+        .status-completed { background: #dafbe1; color: #1a7f37; }
+        .status-failure { background: #ffebe9; color: #cf222e; }
+        .status-cancelled { background: #f6f8fa; color: #57606a; }
+        .logs-link { margin-left: 10px; }
+        .error-message { color: #cf222e; margin-top: 10px; }
+        .loading { opacity: 0.6; }
+        pre { background: #f6f8fa; padding: 10px; border-radius: 6px; overflow-x: auto; }
+        .collapsible { cursor: pointer; user-select: none; }
+        .collapsible-content { display: none; margin-top: 10px; }
+        .collapsible.active + .collapsible-content { display: block; }
+    </style>
+</head>
+<body>
+    <h1>🛠️ GitHub Actions Dashboard</h1>
+
+    <!-- Блок управления токеном -->
+    <div class="token-section">
+        <h3>🔑 Токен GitHub (Personal Access Token)</h3>
+        <div class="flex-row">
+            <input type="password" id="tokenInput" placeholder="Введите токен с правами workflow, repo" style="flex: 2;">
+            <button id="saveTokenBtn">💾 Сохранить</button>
+            <button id="clearTokenBtn" class="secondary">🗑️ Удалить</button>
+        </div>
+        <div id="tokenStatus" class="token-warning"></div>
+        <div class="token-warning">
+            ⚠️ Токен хранится локально в вашем браузере. Не используйте на чужих устройствах.
+        </div>
+    </div>
+
+    <!-- Выбор репозитория -->
+    <div class="container">
+        <h2>📦 Репозиторий</h2>
+        <div class="flex-row">
+            <div>
+                <label>Владелец</label>
+                <input type="text" id="ownerInput" placeholder="username или org" value="miklgorgame">
+            </div>
+            <div>
+                <label>Репозиторий</label>
+                <input type="text" id="repoInput" placeholder="repo name" value="ai_cannel_bot">
+            </div>
+            <div>
+                <label>Ветка (для запуска)</label>
+                <input type="text" id="branchInput" value="main">
+            </div>
+        </div>
+    </div>
+
+    <!-- Список workflows и запуск -->
+    <div class="container">
+        <h2>⚙️ Workflows</h2>
+        <button id="loadWorkflowsBtn">🔄 Загрузить список</button>
+        <div id="workflowsList"></div>
+    </div>
+
+    <!-- История запусков -->
+    <div class="container">
+        <h2>📋 Последние запуски</h2>
+        <div class="flex-row">
+            <button id="loadRunsBtn">🔄 Обновить список</button>
+            <button id="cancelSelectedRunBtn" class="danger" disabled>⛔ Отменить выбранный запуск</button>
+        </div>
+        <div id="runsList"></div>
+    </div>
+
+    <!-- Логи (опционально) -->
+    <div class="container" id="logsContainer" style="display:none;">
+        <h2>📄 Логи запуска</h2>
+        <button id="closeLogsBtn" class="secondary">Закрыть</button>
+        <pre id="logsContent">Загрузка...</pre>
+    </div>
+
+    <script>
+        (function(){
+            "use strict";
+
+            // ---------- Хранение токена в cookies ----------
+            const COOKIE_NAME = 'gh_dashboard_token';
+
+            function setCookie(value, days = 30) {
+                const d = new Date();
+                d.setTime(d.getTime() + (days * 24 * 60 * 60 * 1000));
+                document.cookie = `${COOKIE_NAME}=${encodeURIComponent(value)}; expires=${d.toUTCString()}; path=/; SameSite=Strict`;
+            }
+
+            function getCookie() {
+                const name = COOKIE_NAME + "=";
+                const decoded = decodeURIComponent(document.cookie);
+                const ca = decoded.split(';');
+                for(let c of ca) {
+                    while (c.charAt(0) === ' ') c = c.substring(1);
+                    if (c.indexOf(name) === 0) return c.substring(name.length, c.length);
+                }
+                return null;
+            }
+
+            function deleteCookie() {
+                document.cookie = `${COOKIE_NAME}=; expires=Thu, 01 Jan 1970 00:00:00 UTC; path=/;`;
+            }
+
+            // ---------- DOM элементы ----------
+            const tokenInput = document.getElementById('tokenInput');
+            const tokenStatus = document.getElementById('tokenStatus');
+            const saveTokenBtn = document.getElementById('saveTokenBtn');
+            const clearTokenBtn = document.getElementById('clearTokenBtn');
+            const ownerInput = document.getElementById('ownerInput');
+            const repoInput = document.getElementById('repoInput');
+            const branchInput = document.getElementById('branchInput');
+            const loadWorkflowsBtn = document.getElementById('loadWorkflowsBtn');
+            const workflowsList = document.getElementById('workflowsList');
+            const loadRunsBtn = document.getElementById('loadRunsBtn');
+            const runsList = document.getElementById('runsList');
+            const cancelSelectedRunBtn = document.getElementById('cancelSelectedRunBtn');
+            const logsContainer = document.getElementById('logsContainer');
+            const logsContent = document.getElementById('logsContent');
+            const closeLogsBtn = document.getElementById('closeLogsBtn');
+
+            let currentToken = getCookie() || '';
+            let selectedRunId = null;
+
+            // ---------- Инициализация ----------
+            function updateTokenUI() {
+                if (currentToken) {
+                    tokenInput.value = currentToken.substring(0, 8) + '...' + currentToken.substring(currentToken.length - 4);
+                    tokenStatus.textContent = '✅ Токен загружен из cookies.';
+                    tokenInput.type = 'text';
+                } else {
+                    tokenInput.value = '';
+                    tokenStatus.textContent = '❌ Токен не сохранён. Введите и сохраните.';
+                    tokenInput.type = 'password';
+                }
+            }
+            updateTokenUI();
+
+            saveTokenBtn.addEventListener('click', () => {
+                const token = tokenInput.value.trim();
+                if (!token) {
+                    alert('Введите токен');
+                    return;
+                }
+                currentToken = token;
+                setCookie(token);
+                updateTokenUI();
+                tokenStatus.textContent = '✅ Токен сохранён в cookies.';
+            });
+
+            clearTokenBtn.addEventListener('click', () => {
+                deleteCookie();
+                currentToken = '';
+                updateTokenUI();
+                tokenStatus.textContent = '🗑️ Токен удалён из cookies.';
+            });
+
+            // ---------- API Helper ----------
+            async function githubApiRequest(endpoint, method = 'GET', body = null) {
+                if (!currentToken) throw new Error('Токен не задан');
+                const base = 'https://api.github.com';
+                const url = endpoint.startsWith('http') ? endpoint : base + endpoint;
+
+                const headers = {
+                    'Accept': 'application/vnd.github.v3+json',
+                    'Authorization': `token ${currentToken}`
+                };
+                const options = { method, headers };
+                if (body) {
+                    headers['Content-Type'] = 'application/json';
+                    options.body = JSON.stringify(body);
+                }
+
+                const response = await fetch(url, options);
+                if (!response.ok) {
+                    const text = await response.text();
+                    throw new Error(`GitHub API error ${response.status}: ${text}`);
+                }
+                // Для 204 No Content ответа нет тела
+                if (response.status === 204) return null;
+                return await response.json();
+            }
+
+            // ---------- Загрузка workflows ----------
+            async function loadWorkflows() {
+                if (!currentToken) { alert('Сначала сохраните токен'); return; }
+                const owner = ownerInput.value.trim();
+                const repo = repoInput.value.trim();
+                if (!owner || !repo) { alert('Введите владельца и репозиторий'); return; }
+
+                workflowsList.innerHTML = '<em>Загрузка...</em>';
+                try {
+                    const data = await githubApiRequest(`/repos/${owner}/${repo}/actions/workflows`);
+                    if (!data.workflows || data.workflows.length === 0) {
+                        workflowsList.innerHTML = '<p>Workflows не найдены.</p>';
+                        return;
+                    }
+                    let html = '';
+                    for (const wf of data.workflows) {
+                        html += `
+                            <div class="workflow-item">
+                                <strong>${wf.name}</strong> (${wf.path})<br>
+                                <small>ID: ${wf.id} | Состояние: ${wf.state}</small><br>
+                                <button class="triggerWfBtn" data-wf-id="${wf.id}" data-wf-name="${wf.name}">▶ Запустить</button>
+                                <div class="collapsible" style="margin-top:8px;">⚙️ Параметры (inputs) ▼</div>
+                                <div class="collapsible-content">
+                                    <div id="inputs-${wf.id}">Загрузка параметров...</div>
+                                </div>
+                            </div>
+                        `;
+                    }
+                    workflowsList.innerHTML = html;
+
+                    // Обработчики для кнопок запуска
+                    document.querySelectorAll('.triggerWfBtn').forEach(btn => {
+                        btn.addEventListener('click', async (e) => {
+                            const wfId = e.target.dataset.wfId;
+                            const wfName = e.target.dataset.wfName;
+                            await triggerWorkflow(wfId, wfName);
+                        });
+                    });
+
+                    // Загрузка описания inputs для каждого workflow при раскрытии
+                    document.querySelectorAll('.collapsible').forEach(el => {
+                        el.addEventListener('click', async function() {
+                            this.classList.toggle('active');
+                            const parent = this.closest('.workflow-item');
+                            const wfId = parent.querySelector('.triggerWfBtn').dataset.wfId;
+                            const container = document.getElementById(`inputs-${wfId}`);
+                            if (container && container.innerHTML === 'Загрузка параметров...') {
+                                try {
+                                    const wfDetails = await githubApiRequest(`/repos/${owner}/${repo}/actions/workflows/${wfId}`);
+                                    const inputs = wfDetails.inputs || {};
+                                    if (Object.keys(inputs).length === 0) {
+                                        container.innerHTML = '<em>Нет параметров</em>';
+                                    } else {
+                                        let formHtml = '';
+                                        for (const [key, def] of Object.entries(inputs)) {
+                                            formHtml += `<label>${key} (${def.description || ''})</label>
+                                                         <input type="text" id="input-${wfId}-${key}" placeholder="${def.default || ''}" value="${def.default || ''}"><br>`;
+                                        }
+                                        container.innerHTML = formHtml;
+                                    }
+                                } catch (err) {
+                                    container.innerHTML = `<span class="error-message">Ошибка: ${err.message}</span>`;
+                                }
+                            }
+                        });
+                    });
+
+                } catch (err) {
+                    workflowsList.innerHTML = `<div class="error-message">Ошибка: ${err.message}</div>`;
+                }
+            }
+
+            async function triggerWorkflow(workflowId, workflowName) {
+                const owner = ownerInput.value.trim();
+                const repo = repoInput.value.trim();
+                const ref = branchInput.value.trim() || 'main';
+                if (!owner || !repo) return;
+
+                // Собираем inputs из формы, если есть
+                const inputs = {};
+                const inputsContainer = document.getElementById(`inputs-${workflowId}`);
+                if (inputsContainer) {
+                    const inputFields = inputsContainer.querySelectorAll('input[type="text"]');
+                    inputFields.forEach(field => {
+                        const key = field.id.replace(`input-${workflowId}-`, '');
+                        inputs[key] = field.value;
+                    });
+                }
+
+                try {
+                    await githubApiRequest(
+                        `/repos/${owner}/${repo}/actions/workflows/${workflowId}/dispatches`,
+                        'POST',
+                        { ref, inputs }
+                    );
+                    alert(`Workflow "${workflowName}" запущен!`);
+                    // Обновим список запусков через пару секунд
+                    setTimeout(() => loadRuns(), 2000);
+                } catch (err) {
+                    alert(`Ошибка запуска: ${err.message}`);
+                }
+            }
+
+            // ---------- Загрузка списка запусков ----------
+            async function loadRuns() {
+                if (!currentToken) { alert('Сначала сохраните токен'); return; }
+                const owner = ownerInput.value.trim();
+                const repo = repoInput.value.trim();
+                if (!owner || !repo) { alert('Введите владельца и репозиторий'); return; }
+
+                runsList.innerHTML = '<em>Загрузка...</em>';
+                cancelSelectedRunBtn.disabled = true;
+                selectedRunId = null;
+
+                try {
+                    const data = await githubApiRequest(`/repos/${owner}/${repo}/actions/runs?per_page=20`);
+                    if (!data.workflow_runs || data.workflow_runs.length === 0) {
+                        runsList.innerHTML = '<p>Нет запусков.</p>';
+                        return;
+                    }
+
+                    let html = '';
+                    for (const run of data.workflow_runs) {
+                        const statusClass = `status-${run.status}`;
+                        const conclusionClass = run.conclusion ? `status-${run.conclusion}` : '';
+                        const badgeClass = conclusionClass || statusClass;
+                        const createdAt = new Date(run.created_at).toLocaleString();
+                        const isActive = run.status === 'queued' || run.status === 'in_progress';
+
+                        html += `
+                            <div class="run-item" data-run-id="${run.id}">
+                                <div class="run-header">
+                                    <span>
+                                        <strong>${run.name}</strong> (#${run.run_number})<br>
+                                        <small>${run.head_branch} @ ${run.head_sha.substring(0,7)} | ${createdAt}</small>
+                                    </span>
+                                    <span class="status-badge ${badgeClass}">${run.status}${run.conclusion ? ' / '+run.conclusion : ''}</span>
+                                </div>
+                                <div>
+                                    <a href="${run.html_url}" target="_blank" class="logs-link">🌐 Открыть на GitHub</a>
+                                    <button class="viewLogsBtn secondary" data-run-id="${run.id}">📄 Логи (API)</button>
+                                    ${isActive ? `<button class="cancelRunBtn danger" data-run-id="${run.id}">⛔ Отменить</button>` : ''}
+                                    <button class="selectRunBtn secondary" data-run-id="${run.id}">☑️ Выбрать</button>
+                                </div>
+                            </div>
+                        `;
+                    }
+                    runsList.innerHTML = html;
+
+                    // Обработчики кнопок
+                    document.querySelectorAll('.viewLogsBtn').forEach(btn => {
+                        btn.addEventListener('click', async (e) => {
+                            const runId = e.target.dataset.runId;
+                            await viewLogs(runId);
+                        });
+                    });
+
+                    document.querySelectorAll('.cancelRunBtn').forEach(btn => {
+                        btn.addEventListener('click', async (e) => {
+                            const runId = e.target.dataset.runId;
+                            await cancelRun(runId);
+                        });
+                    });
+
+                    document.querySelectorAll('.selectRunBtn').forEach(btn => {
+                        btn.addEventListener('click', (e) => {
+                            const runId = e.target.dataset.runId;
+                            selectedRunId = runId;
+                            cancelSelectedRunBtn.disabled = false;
+                            // Визуально выделим выбранный элемент
+                            document.querySelectorAll('.run-item').forEach(el => el.style.backgroundColor = '');
+                            e.target.closest('.run-item').style.backgroundColor = '#f0f6fc';
+                        });
+                    });
+
+                } catch (err) {
+                    runsList.innerHTML = `<div class="error-message">Ошибка: ${err.message}</div>`;
+                }
+            }
+
+            async function cancelRun(runId) {
+                if (!confirm(`Отменить запуск #${runId}?`)) return;
+                const owner = ownerInput.value.trim();
+                const repo = repoInput.value.trim();
+                try {
+                    await githubApiRequest(`/repos/${owner}/${repo}/actions/runs/${runId}/cancel`, 'POST');
+                    alert('Запуск отменён.');
+                    loadRuns();
+                } catch (err) {
+                    alert(`Ошибка отмены: ${err.message}`);
+                }
+            }
+
+            cancelSelectedRunBtn.addEventListener('click', async () => {
+                if (selectedRunId) {
+                    await cancelRun(selectedRunId);
+                    selectedRunId = null;
+                    cancelSelectedRunBtn.disabled = true;
+                }
+            });
+
+            async function viewLogs(runId) {
+                const owner = ownerInput.value.trim();
+                const repo = repoInput.value.trim();
+                logsContainer.style.display = 'block';
+                logsContent.textContent = 'Загрузка логов...';
+
+                try {
+                    // Получаем ссылку на логи (zip архив), но отобразить текстом сложно.
+                    // Альтернатива: получить список jobs и затем логи каждой job.
+                    const jobsData = await githubApiRequest(`/repos/${owner}/${repo}/actions/runs/${runId}/jobs`);
+                    let logText = '';
+                    for (const job of jobsData.jobs) {
+                        logText += `=== JOB: ${job.name} (${job.status}) ===\n`;
+                        if (job.status === 'completed') {
+                            const logResponse = await fetch(job.logs_url, {
+                                headers: { 'Authorization': `token ${currentToken}` }
+                            });
+                            if (logResponse.ok) {
+                                const text = await logResponse.text();
+                                logText += text + '\n\n';
+                            } else {
+                                logText += `Не удалось загрузить логи: ${logResponse.status}\n\n`;
+                            }
+                        } else {
+                            logText += `Логи недоступны (статус: ${job.status})\n\n`;
+                        }
+                    }
+                    logsContent.textContent = logText || 'Логи пусты.';
+                } catch (err) {
+                    logsContent.textContent = `Ошибка получения логов: ${err.message}`;
+                }
+            }
+
+            closeLogsBtn.addEventListener('click', () => {
+                logsContainer.style.display = 'none';
+                logsContent.textContent = '';
+            });
+
+            // ---------- Привязка событий ----------
+            loadWorkflowsBtn.addEventListener('click', loadWorkflows);
+            loadRunsBtn.addEventListener('click', loadRuns);
+
+            // Автозагрузка при наличии токена
+            if (currentToken) {
+                // Можно автоматически загрузить runs при загрузке страницы
+                // loadRuns();
+            }
+
+            // Экспорт для отладки (опционально)
+            window.dashboard = {
+                loadWorkflows, loadRuns, triggerWorkflow, cancelRun, viewLogs
+            };
+        })();
+    </script>
+</body>
+</html>
