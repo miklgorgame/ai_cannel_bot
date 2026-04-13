@@ -443,7 +443,7 @@ def generate_reply(comment_text: str, post_content: str) -> str:
     prompt = f"""
 Ты — автор IT-канала. Подписчик: "{comment_text}"
 Пост был о: {post_content[:500]}
-Ответь дружелюбно, с юмором (2-3 предложения). Если про Max — легкая ирония.
+Ответь дружелюбно, с юмором (2-3 предложения). Если про Max — легкая ирония. Ты не любишь цифровой контроль и мессенджер Max (от VK), но не выражаешь это открыто — только лёгкий сарказм в новостях на эту тему.
 """
     for model in FALLBACK_MODELS:
         try:
@@ -464,7 +464,7 @@ def generate_reply(comment_text: str, post_content: str) -> str:
 
 # ===================== ПРОВЕРКА КОММЕНТАРИЕВ (С OFFSET, 5 ПОСТОВ) =====================
 async def check_and_reply_to_comments(bot: Bot):
-    logger.info("💬 Проверяю комментарии к последним 5 постам...")
+    logger.info("💬 Проверяю комментарии к последним 10 постам...")
     
     last_posts = get_last_posts(limit=5)
     if not last_posts:
