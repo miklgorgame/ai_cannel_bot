@@ -483,24 +483,43 @@ def generate_reply(comment_text: str, post_content: str) -> str:
 
 # ===================== ПРОВЕРКА КОММЕНТАРИЕВ (УЛУЧШЕННАЯ ВЕРСИЯ) =====================
 # ===================== ПРОВЕРКА КОММЕНТАРИЕВ =====================
+# ===================== ПРОВЕРКА КОММЕНТАРИЕВ (с фильтром по времени) =====================
 async def check_and_reply_to_comments(bot: Bot):
-    logger.info("💬 Проверяю комментарии к последним 10 постам...")
+    logger.info("💬 Проверяю комментарии к свежим постам (не старше 7 дней)...")
 
-    last_posts = get_last_posts(limit=10)
-    if not last_posts:
-        logger.info("Нет опубликованных постов для проверки комментариев.")
+    # === 1. Берём только свежие посты (младше 7 дней) ===
+    cutoff = (datetime.now() - timedelta(days=7)).isoformat()
+    
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    c.execute("""
+        SELECT id, message_id, content, created_at 
+        FROM posts 
+        WHERE created_at >= ? 
+        ORDER BY created_at DESC 
+        LIMIT 15
+    """, (cutoff,))
+    rows = c.fetchall()
+    conn.close()
+
+    if not rows:
+        logger.info("Нет свежих постов младше 7 дней для проверки комментариев.")
         return
 
+    last_posts = [
+        {"id": r[0], "message_id": r[1], "content": r[2], "created_at": r[3]} 
+        for r in rows
+    ]
     post_ids = {post['message_id']: post for post in last_posts}
-    offset = get_comments_offset()
 
-    logger.info(f"Ожидаемые message_id: {list(post_ids.keys())} | offset: {offset}")
+    offset = get_comments_offset()
+    logger.info(f"Найдено свежих постов: {len(last_posts)} | offset комментариев: {offset}")
 
     max_id = offset - 1
     processed_count = 0
 
     try:
-        # Даём Telegram время обработать новые сообщения после публикации
+        # Даём Telegram время на доставку новых сообщений
         await asyncio.sleep(10)
 
         updates = await bot.get_updates(
@@ -520,11 +539,11 @@ async def check_and_reply_to_comments(bot: Bot):
             if not msg:
                 continue
 
-            # Фильтр по нужному чату
+            # Проверяем, что сообщение из нужной группы
             if COMMENTS_CHAT_ID and msg.chat_id != COMMENTS_CHAT_ID:
                 continue
 
-            # Нас интересуют только ответы (reply) на наши посты
+            # Проверяем, что это ответ (reply) на один из наших постов
             if not msg.reply_to_message:
                 continue
 
@@ -533,6 +552,8 @@ async def check_and_reply_to_comments(bot: Bot):
                 continue
 
             comment_id = msg.message_id
+
+            # Пропускаем уже обработанные комментарии
             if is_comment_processed(comment_id):
                 continue
 
@@ -541,8 +562,10 @@ async def check_and_reply_to_comments(bot: Bot):
                 continue
 
             username = msg.from_user.username or msg.from_user.first_name or "Anonymous"
-            logger.info(f"📝 Новый комментарий от @{username} (id={comment_id}): {comment_text[:70]}...")
+            logger.info(f"📝 Новый комментарий от @{username} (id={comment_id}): {comment_text[:80]}...")
 
+            # === 2. Запрос к ИИ для генерации ответа ===
+            logger.info(f"🤖 Генерирую ответ на комментарий {comment_id}...")
             reply_text = generate_reply(comment_text, replied_post['content'])
 
             if reply_text:
@@ -555,16 +578,16 @@ async def check_and_reply_to_comments(bot: Bot):
                     )
                     mark_comment_processed(comment_id, replied_post['id'])
                     processed_count += 1
-                    logger.info(f"✅ Ответ успешно отправлен на комментарий {comment_id}")
+                    logger.info(f"✅ Ответ на комментарий {comment_id} успешно отправлен")
                 except Exception as e:
-                    logger.error(f"❌ Не удалось отправить ответ на {comment_id}: {e}")
+                    logger.error(f"❌ Ошибка отправки ответа на комментарий {comment_id}: {e}")
             else:
                 logger.warning(f"⚠️ Не удалось сгенерировать ответ для комментария {comment_id}")
 
     except Exception as e:
-        logger.error(f"❌ Ошибка в check_and_reply_to_comments: {e}", exc_info=True)
+        logger.error(f"❌ Критическая ошибка в check_and_reply_to_comments: {e}", exc_info=True)
     finally:
-        # Всегда сохраняем offset!
+        # Всегда сохраняем offset, даже если была ошибка
         if max_id >= offset:
             new_offset = max_id + 1
             save_comments_offset(new_offset)
@@ -572,7 +595,7 @@ async def check_and_reply_to_comments(bot: Bot):
         else:
             logger.info("Offset не изменился")
 
-        logger.info(f"✅ Обработано новых комментариев: {processed_count}")
+        logger.info(f"✅ Всего обработано новых комментариев: {processed_count}")
 # ===================== КОМАНДЫ СОЗДАТЕЛЯ =====================
 async def check_creator_messages(bot: Bot):
     logger.info("👤 Проверяю сообщения создателя...")
