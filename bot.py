@@ -375,38 +375,46 @@ async def send_telegram_message(chat_id: int, text: str, bot: Bot) -> tuple[bool
 # ===================== УДАЛЕНИЕ ДУБЛИКАТА ФОТО ИЗ ГРУППЫ =====================
 async def delete_duplicate_from_group(photo_message_id: int, post_text: str, bot: Bot):
     if not TG_GROUP_ID:
-        logger.info("TG_GROUP_ID не задан, пропускаем удаление дубликатов.")
         return
-    logger.info(f"🔍 Ищу дубликат фото (message_id={photo_message_id}) в группе {TG_GROUP_ID}...")
-    await asyncio.sleep(5)
-    # Используем offset комментариев, чтобы не перечитывать всё заново
+
+    logger.info(f"🔍 Ищу дубликат поста (message_id={photo_message_id}) в группе...")
+    await asyncio.sleep(8)  # даём Telegram больше времени
+
     offset = get_comments_offset()
+    max_id = offset - 1
+
     try:
-        updates = await bot.get_updates(offset=offset, timeout=5, allowed_updates=["message"])
-        max_id = offset - 1
+        updates = await bot.get_updates(
+            offset=offset,
+            limit=50,
+            timeout=10,
+            allowed_updates=["message"]
+        )
+
         for update in updates:
             if update.update_id > max_id:
                 max_id = update.update_id
+
             msg = update.message
-            if not msg:
+            if not msg or msg.chat_id != int(TG_GROUP_ID):
                 continue
-            if msg.chat_id != int(TG_GROUP_ID):
-                continue
+
+            # Более надёжная проверка дубликата
             if msg.photo and not msg.reply_to_message:
-                caption = msg.caption or ""
-                if caption and post_text.startswith(caption[:50]):
-                    logger.info(f"Найден дубликат фото в группе, message_id={msg.message_id}")
+                caption = (msg.caption or "").strip()
+                if caption and (post_text[:100] in caption or caption[:100] in post_text):
                     try:
                         await bot.delete_message(chat_id=TG_GROUP_ID, message_id=msg.message_id)
-                        logger.info("✅ Дубликат фото удалён из группы обсуждения.")
+                        logger.info(f"✅ Дубликат фото удалён из группы (message_id={msg.message_id})")
+                        break
                     except Exception as e:
                         logger.warning(f"Не удалось удалить дубликат: {e}")
-                    break
+
         if max_id >= offset:
             save_comments_offset(max_id + 1)
-    except Exception as e:
-        logger.warning(f"Ошибка при удалении дубликата: {e}")
 
+    except Exception as e:
+        logger.error(f"Ошибка при удалении дубликата: {e}", exc_info=True)
 # ===================== ГЕНЕРАЦИЯ ТЕКСТА =====================
 ai_client = None
 
@@ -474,50 +482,35 @@ def generate_reply(comment_text: str, post_content: str) -> str:
     return None
 
 # ===================== ПРОВЕРКА КОММЕНТАРИЕВ (УЛУЧШЕННАЯ ВЕРСИЯ) =====================
+# ===================== ПРОВЕРКА КОММЕНТАРИЕВ =====================
 async def check_and_reply_to_comments(bot: Bot):
     logger.info("💬 Проверяю комментарии к последним 10 постам...")
 
-    last_posts = get_last_posts(limit=10)   # Увеличили с 5 до 10
+    last_posts = get_last_posts(limit=10)
     if not last_posts:
         logger.info("Нет опубликованных постов для проверки комментариев.")
         return
 
     post_ids = {post['message_id']: post for post in last_posts}
-    logger.info(f"Ожидаемые message_id постов: {list(post_ids.keys())}")
-
     offset = get_comments_offset()
-    logger.info(f"Текущий offset комментариев: {offset}")
+
+    logger.info(f"Ожидаемые message_id: {list(post_ids.keys())} | offset: {offset}")
 
     max_id = offset - 1
     processed_count = 0
-    updates_received = 0
 
     try:
-        # Добавили небольшую задержку, чтобы Telegram успел зарегистрировать новые сообщения
-        if len(last_posts) > 0:
-            logger.info("⏳ Ждём 8 секунд, чтобы Telegram обработал новые сообщения...")
-            await asyncio.sleep(8)
+        # Даём Telegram время обработать новые сообщения после публикации
+        await asyncio.sleep(10)
 
         updates = await bot.get_updates(
             offset=offset,
             limit=100,
-            timeout=15,
+            timeout=20,
             allowed_updates=["message"]
         )
-        
-        updates_received = len(updates)
-        logger.info(f"Получено {updates_received} обновлений от Telegram")
 
-        seen_chats = set()
-        for update in updates:
-            if update.message and update.message.chat:
-                chat = update.message.chat
-                seen_chats.add(f"{chat.id} ({chat.type})")
-        
-        if seen_chats:
-            logger.info(f"Бот видит чаты: {', '.join(seen_chats)}")
-        else:
-            logger.warning("Бот не получил сообщений. Offset может быть слишком новым.")
+        logger.info(f"Получено обновлений от Telegram: {len(updates)}")
 
         for update in updates:
             if update.update_id > max_id:
@@ -527,14 +520,15 @@ async def check_and_reply_to_comments(bot: Bot):
             if not msg:
                 continue
 
+            # Фильтр по нужному чату
             if COMMENTS_CHAT_ID and msg.chat_id != COMMENTS_CHAT_ID:
                 continue
 
-            reply_to = msg.reply_to_message
-            if not reply_to:
+            # Нас интересуют только ответы (reply) на наши посты
+            if not msg.reply_to_message:
                 continue
 
-            replied_post = post_ids.get(reply_to.message_id)
+            replied_post = post_ids.get(msg.reply_to_message.message_id)
             if not replied_post:
                 continue
 
@@ -547,7 +541,7 @@ async def check_and_reply_to_comments(bot: Bot):
                 continue
 
             username = msg.from_user.username or msg.from_user.first_name or "Anonymous"
-            logger.info(f"📝 Новый комментарий (id={comment_id}) от @{username}: {comment_text[:70]}...")
+            logger.info(f"📝 Новый комментарий от @{username} (id={comment_id}): {comment_text[:70]}...")
 
             reply_text = generate_reply(comment_text, replied_post['content'])
 
@@ -559,25 +553,26 @@ async def check_and_reply_to_comments(bot: Bot):
                         reply_to_message_id=comment_id,
                         parse_mode="HTML"
                     )
-                    logger.info(f"✅ Ответ отправлен на комментарий {comment_id}")
                     mark_comment_processed(comment_id, replied_post['id'])
                     processed_count += 1
+                    logger.info(f"✅ Ответ успешно отправлен на комментарий {comment_id}")
                 except Exception as e:
-                    logger.error(f"❌ Ошибка отправки ответа: {e}")
+                    logger.error(f"❌ Не удалось отправить ответ на {comment_id}: {e}")
             else:
-                logger.warning(f"Не удалось сгенерировать ответ на комментарий {comment_id}")
+                logger.warning(f"⚠️ Не удалось сгенерировать ответ для комментария {comment_id}")
 
     except Exception as e:
         logger.error(f"❌ Ошибка в check_and_reply_to_comments: {e}", exc_info=True)
     finally:
+        # Всегда сохраняем offset!
         if max_id >= offset:
             new_offset = max_id + 1
             save_comments_offset(new_offset)
-            logger.info(f"💾 Offset обновлён: {offset} → {new_offset}")
+            logger.info(f"💾 Offset комментариев обновлён: {offset} → {new_offset}")
         else:
             logger.info("Offset не изменился")
 
-        logger.info(f"✅ Обработано новых комментариев: {processed_count} из {updates_received} обновлений")
+        logger.info(f"✅ Обработано новых комментариев: {processed_count}")
 # ===================== КОМАНДЫ СОЗДАТЕЛЯ =====================
 async def check_creator_messages(bot: Bot):
     logger.info("👤 Проверяю сообщения создателя...")
