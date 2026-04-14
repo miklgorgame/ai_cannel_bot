@@ -474,102 +474,128 @@ def generate_reply(comment_text: str, post_content: str) -> str:
     return None
 
 # ===================== ПРОВЕРКА КОММЕНТАРИЕВ (С OFFSET, 5 ПОСТОВ) =====================
+# ===================== ПРОВЕРКА КОММЕНТАРИЕВ (УЛУЧШЕННАЯ ВЕРСИЯ) =====================
 async def check_and_reply_to_comments(bot: Bot):
-    logger.info("💬 Проверяю комментарии к последним 10 постам...")
-    
+    logger.info("💬 Проверяю комментарии к последним 5 постам...")
+
     last_posts = get_last_posts(limit=5)
     if not last_posts:
-        logger.info("Нет постов для проверки комментариев.")
+        logger.info("Нет опубликованных постов для проверки комментариев.")
         return
-    
+
     post_ids = {post['message_id']: post for post in last_posts}
-    logger.info(f"Ожидаемые ID постов: {list(post_ids.keys())}")
-    
+    logger.info(f"Ожидаемые message_id постов: {list(post_ids.keys())}")
+
     offset = get_comments_offset()
     logger.info(f"Текущий offset комментариев: {offset}")
-    
-    try:
-        updates = await bot.get_updates(offset=offset, limit=100, timeout=10, allowed_updates=["message"])
-    except Exception as e:
-        logger.error(f"Ошибка получения обновлений: {e}")
-        return
-    
+
     max_id = offset - 1
     processed_count = 0
-    
-    # Диагностика видимых чатов
-    seen_chats = set()
-    for update in updates:
-        if update.message:
-            chat = update.message.chat
-            seen_chats.add(f"{chat.id} ({chat.type})")
-    if seen_chats:
-        logger.info(f"Бот видит чаты: {', '.join(seen_chats)}")
-    else:
-        logger.warning("Бот не видит ни одного чата (нет сообщений).")
-    
-    if COMMENTS_CHAT_ID:
-        logger.info(f"Ожидаемый чат для комментариев: {COMMENTS_CHAT_ID}")
-    else:
-        logger.warning("COMMENTS_CHAT_ID не задан! Проверьте TG_GROUP_ID или TG_CHAT_ID")
-    
-    for update in updates:
-        if update.update_id > max_id:
-            max_id = update.update_id
+    updates_received = 0
+
+    try:
+        # Увеличили limit и timeout, добавили allowed_updates
+        updates = await bot.get_updates(
+            offset=offset,
+            limit=100,
+            timeout=15,
+            allowed_updates=["message"]
+        )
         
-        msg = update.message
-        if not msg:
-            continue
+        updates_received = len(updates)
+        logger.info(f"Получено {updates_received} обновлений от Telegram")
+
+        # Диагностика видимых чатов (полезно для отладки)
+        seen_chats = set()
+        for update in updates:
+            if update.message and update.message.chat:
+                chat = update.message.chat
+                seen_chats.add(f"{chat.id} ({chat.type})")
         
-        # Фильтр по нужному чату
-        if COMMENTS_CHAT_ID and msg.chat_id != COMMENTS_CHAT_ID:
-            continue
-        
-        # Ответ на сообщение
-        reply_to = msg.reply_to_message
-        if not reply_to:
-            continue
-        
-        replied_post = post_ids.get(reply_to.message_id)
-        if not replied_post:
-            continue
-        
-        comment_id = msg.message_id
-        if is_comment_processed(comment_id):
-            continue
-        
-        comment_text = msg.text
-        if not comment_text:
-            continue
-        
-        username = msg.from_user.username or msg.from_user.first_name
-        logger.info(f"📝 Новый комментарий к посту {replied_post['message_id']} от @{username}: {comment_text[:50]}...")
-        
-        reply_text = generate_reply(comment_text, replied_post['content'])
-        if reply_text:
-            try:
-                await bot.send_message(
-                    chat_id=msg.chat_id,
-                    text=reply_text,
-                    reply_to_message_id=comment_id,
-                    parse_mode="HTML"
-                )
-                logger.info(f"✅ Отправлен ответ на комментарий {comment_id}")
-                # ТОЛЬКО при успешной отправке помечаем как обработанный
-                mark_comment_processed(comment_id, replied_post['id'])
-                processed_count += 1
-            except Exception as e:
-                logger.error(f"Не удалось отправить ответ: {e}")
-                # НЕ помечаем – пусть попробует в следующий раз
+        if seen_chats:
+            logger.info(f"Бот видит чаты: {', '.join(seen_chats)}")
         else:
-            logger.warning(f"Не удалось сгенерировать ответ на комментарий {comment_id}")
-            # НЕ помечаем – возможно, модель временно недоступна
-    
-    # Сохраняем новый offset
-    if max_id >= offset:
-        save_comments_offset(max_id + 1)
-    
-    logger.info(f"Обработано новых комментариев: {processed_count}")
+            logger.warning("Бот не получил ни одного сообщения (возможно, offset слишком новый или нет активности)")
+
+        if COMMENTS_CHAT_ID:
+            logger.info(f"Ожидаемый COMMENTS_CHAT_ID: {COMMENTS_CHAT_ID}")
+        else:
+            logger.warning("COMMENTS_CHAT_ID не задан! Проверь TG_GROUP_ID или TG_CHAT_ID")
+
+        for update in updates:
+            if update.update_id > max_id:
+                max_id = update.update_id
+
+            msg = update.message
+            if not msg:
+                continue
+
+            # Пропускаем сообщения не из нужного чата
+            if COMMENTS_CHAT_ID and msg.chat_id != COMMENTS_CHAT_ID:
+                continue
+
+            # Нас интересуют только ответы на наши посты
+            reply_to = msg.reply_to_message
+            if not reply_to:
+                continue
+
+            # Проверяем, является ли это ответом на один из наших последних постов
+            replied_post = post_ids.get(reply_to.message_id)
+            if not replied_post:
+                continue
+
+            comment_id = msg.message_id
+
+            # Пропускаем уже обработанные комментарии
+            if is_comment_processed(comment_id):
+                continue
+
+            comment_text = msg.text or msg.caption
+            if not comment_text:
+                continue
+
+            username = msg.from_user.username or msg.from_user.first_name or "Anonymous"
+            logger.info(f"📝 Новый комментарий (id={comment_id}) от @{username}: {comment_text[:60]}...")
+
+            # Генерируем ответ
+            reply_text = generate_reply(comment_text, replied_post['content'])
+
+            if reply_text:
+                try:
+                    await bot.send_message(
+                        chat_id=msg.chat_id,
+                        text=reply_text,
+                        reply_to_message_id=comment_id,
+                        parse_mode="HTML"
+                    )
+                    logger.info(f"✅ Успешно ответил на комментарий {comment_id}")
+                    
+                    # Помечаем как обработанный ТОЛЬКО после успешной отправки
+                    mark_comment_processed(comment_id, replied_post['id'])
+                    processed_count += 1
+                    
+                except TelegramError as e:
+                    logger.error(f"❌ TelegramError при отправке ответа на {comment_id}: {e}")
+                    # Не помечаем — попробуем ответить в следующий раз
+                except Exception as e:
+                    logger.error(f"❌ Неизвестная ошибка при ответе на комментарий {comment_id}: {e}")
+            else:
+                logger.warning(f"⚠️ Не удалось сгенерировать ответ на комментарий {comment_id}")
+
+    except TelegramError as e:
+        logger.error(f"❌ TelegramError при get_updates: {e}")
+    except Exception as e:
+        logger.error(f"❌ Неожиданная ошибка в check_and_reply_to_comments: {e}", exc_info=True)
+    finally:
+        # КРИТИЧНО: сохраняем offset ВСЕГДА, даже если была ошибка
+        if max_id >= offset:
+            new_offset = max_id + 1
+            save_comments_offset(new_offset)
+            logger.info(f"💾 Offset комментариев обновлён: {offset} → {new_offset}")
+        else:
+            logger.info("Offset не изменился")
+
+        logger.info(f"✅ Обработано новых комментариев: {processed_count} из {updates_received} полученных обновлений")
 
 # ===================== КОМАНДЫ СОЗДАТЕЛЯ =====================
 async def check_creator_messages(bot: Bot):
@@ -643,43 +669,65 @@ async def publish_new_post(bot: Bot):
         await send_telegram_message(CREATOR_ID, error_msg, bot)
 
 # ===================== MAIN =====================
-async def run_all(bot: Bot):
-    logger.info("🔄 Выполняю все задачи: публикация + комментарии + команды")
-    await publish_new_post(bot)
-    await check_and_reply_to_comments(bot)
-    await check_creator_messages(bot)
+async def safe_publish(bot: Bot):
+    """Публикация новостей с защитой"""
+    try:
+        logger.info("📝 Запуск публикации нового поста...")
+        await publish_new_post(bot)
+    except Exception as e:
+        logger.error(f"❌ Критическая ошибка при публикации поста: {e}", exc_info=True)
+        try:
+            await send_telegram_message(CREATOR_ID, f"❌ Ошибка публикации: {str(e)[:300]}", bot)
+        except:
+            pass  # если даже уведомление не ушло — не падаем
 
-async def run_publish(bot: Bot):
-    await publish_new_post(bot)
+async def safe_check_comments(bot: Bot):
+    """Проверка комментариев с защитой"""
+    try:
+        logger.info("💬 Запуск проверки комментариев...")
+        await check_and_reply_to_comments(bot)
+    except Exception as e:
+        logger.error(f"❌ Ошибка при проверке комментариев: {e}", exc_info=True)
 
-async def run_check(bot: Bot):
-    await check_and_reply_to_comments(bot)
-    await check_creator_messages(bot)
+async def safe_check_creator(bot: Bot):
+    try:
+        await check_creator_messages(bot)
+    except Exception as e:
+        logger.error(f"❌ Ошибка проверки команд создателя: {e}", exc_info=True)
 
-def main():
-    logger.info("🚀 Запуск бота...")
+async def main():
+    logger.info("🚀 === Запуск ai_cannel_bot ===")
     init_db()
     clean_old_news()
-    
+
     bot = Bot(token=TG_BOT_TOKEN)
-    
-    if TEST_MODE:
-        logger.info("🧪 ТЕСТОВЫЙ РЕЖИМ: публикую пост, затем проверяю комментарии и команды")
-        asyncio.run(run_all(bot))
-        return
-    
-    now = datetime.now(IZHEVSK_TZ)
-    hour = now.hour
-    logger.info(f"🕐 Текущее время по Ижевску: {now.strftime('%Y-%m-%d %H:%M:%S')}")
-    
-    if hour in [9, 10, 12, 14, 16, 18]:
-        logger.info(f"⏰ {hour}:00 — публикую пост, затем проверяю комментарии и команды")
-        asyncio.run(run_all(bot))
-    else:
-        logger.info(f"🕐 {hour}:00 — проверяю комментарии и сообщения создателя")
-        asyncio.run(run_check(bot))
-    
-    logger.info("✅ Работа завершена")
+
+    try:
+        if TEST_MODE:
+            logger.info("🧪 ТЕСТОВЫЙ РЕЖИМ")
+            await safe_publish(bot)
+            await safe_check_comments(bot)
+            await safe_check_creator(bot)
+            return
+
+        now = datetime.now(IZHEVSK_TZ)
+        hour = now.hour
+        logger.info(f"🕐 Время по Ижевску: {hour}:00")
+
+        # Всегда проверяем комментарии и команды создателя
+        await safe_check_comments(bot)
+        await safe_check_creator(bot)
+
+        # Публикуем только в нужные часы
+        if hour in [9, 10, 12, 14, 16, 18]:
+            await safe_publish(bot)
+        else:
+            logger.info("⏰ Не время публикации — только проверка комментариев")
+
+    except Exception as e:
+        logger.error(f"🚨 ГЛОБАЛЬНАЯ ОШИБКА в main: {e}", exc_info=True)
+    finally:
+        logger.info("✅ === Завершение запуска бота ===\n")
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())
