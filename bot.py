@@ -378,7 +378,7 @@ async def delete_duplicate_from_group(photo_message_id: int, post_text: str, bot
         return
 
     logger.info(f"🔍 Ищу дубликат поста (message_id={photo_message_id}) в группе...")
-    await asyncio.sleep(8)  # даём Telegram больше времени
+    await asyncio.sleep(10)   # больше времени на появление дубликата
 
     offset = get_comments_offset()
     max_id = offset - 1
@@ -387,7 +387,7 @@ async def delete_duplicate_from_group(photo_message_id: int, post_text: str, bot
         updates = await bot.get_updates(
             offset=offset,
             limit=50,
-            timeout=10,
+            timeout=15,
             allowed_updates=["message"]
         )
 
@@ -399,22 +399,22 @@ async def delete_duplicate_from_group(photo_message_id: int, post_text: str, bot
             if not msg or msg.chat_id != int(TG_GROUP_ID):
                 continue
 
-            # Более надёжная проверка дубликата
-            if msg.photo and not msg.reply_to_message:
+            # Более мягкая проверка дубликата
+            if msg.photo:
                 caption = (msg.caption or "").strip()
-                if caption and (post_text[:100] in caption or caption[:100] in post_text):
+                if caption and (post_text[:120] in caption or caption[:120] in post_text):
                     try:
                         await bot.delete_message(chat_id=TG_GROUP_ID, message_id=msg.message_id)
-                        logger.info(f"✅ Дубликат фото удалён из группы (message_id={msg.message_id})")
+                        logger.info(f"✅ Дубликат успешно удалён из группы (id={msg.message_id})")
                         break
                     except Exception as e:
-                        logger.warning(f"Не удалось удалить дубликат: {e}")
+                        logger.warning(f"Не удалось удалить сообщение: {e}")
 
         if max_id >= offset:
             save_comments_offset(max_id + 1)
 
     except Exception as e:
-        logger.error(f"Ошибка при удалении дубликата: {e}", exc_info=True)
+        logger.error(f"Ошибка при поиске дубликата: {e}", exc_info=True)
 # ===================== ГЕНЕРАЦИЯ ТЕКСТА =====================
 ai_client = None
 
