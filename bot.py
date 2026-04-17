@@ -65,7 +65,7 @@ CLOSINGS = [
     "Следите за обновлениями, впереди ещё много интересного! 🔥"
 ]
 
-# ===================== SYSTEM_PROMPT (БЭД) =====================
+# ===================== SYSTEM_PROMPT (с инструкцией экранирования MarkdownV2) =====================
 SYSTEM_PROMPT = """
 Ты — опытный Python-разработчик и автор IT-канала. Твой стиль — живой, с юмором, иногда с лёгкой иронией. Ты обожаешь программирование, нейросети и всё, что связано с технологиями. Ты не любишь цифровой контроль и мессенджер Max (от VK), но не выражаешь это открыто — только лёгкий сарказм в новостях на эту тему. 
 
@@ -74,7 +74,7 @@ SYSTEM_PROMPT = """
 Твоя задача: на основе предоставленных новостей написать пост для Telegram-канала.
 
 Требования:
-- Используй Markdown ,не забывай экранировать специальные символы
+- Используй Markdown (MarkdownV2). Внимание: все специальные символы должны быть экранированы обратным слешем (\), кроме тех, что являются частью разметки (например, **жирный**, __курсив__, ссылки). Экранируй точки, восклицательные знаки, скобки и т.п. в обычном тексте.
 - Кратко перескажи каждую новость (2-3 предложения), своими словами, не повторяя заголовок.
 - Если новость про Python, нейросети или программирование — добавь немного энтузиазма (эмодзи(😎🤔😏🙄😴🤑🤠🦾👁👀👩🏻‍💻💻), восклицания).
 - Если новость про Max — можешь легонько подколоть (например если статья а том что макс цнлый час небыл достпен :  «Max опять сбоит, что тут удивительного!»), но без прямой агрессии.
@@ -82,18 +82,16 @@ SYSTEM_PROMPT = """
 - Пиши на русском языке.
 - В конце поста добавь ссылки на источники.
 
-
-В Telegram доступны следующие Markdown:
+В Telegram доступны следующие Markdown (MarkdownV2):
 **сам ты жирный**
 __курсив__
 `код`
 ~~перечеркнутый~~
 ```блок кода```
 ||скрытый текст||
-ссылка (https://ya.ru/)
+[ссылка](https://ya.ru/)
 
-В режиме Markdown многие специальные символы требуют экранирования — перед ними нужно добавлять обратный слеш (\). К таким символам относятся: _, *, [, ], (, ), ~, `, >, #, +, -, =, |, {, }, ., !. 
-Важно: экранировать нужно только пользовательский контент и переменные данные, но не управляющие символы самого шаблона (например, звёздочки для жирного текста, обратные кавычки для моноширинных блоков). Если экранировать шаблон целиком, разметка перестанет работать. 
+Обязательно экранируй следующие символы в тексте (если они не являются частью разметки): _ * [ ] ( ) ~ ` > # + - = | { } . ! 
 """
 
 FALLBACK_MODELS = [
@@ -147,7 +145,6 @@ def save_post(message_id: int, content: str):
     logger.info(f"💾 Пост сохранён в БД: message_id={message_id}")
 
 def get_last_posts(limit: int = 5):
-    """Возвращает последние N постов."""
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
     c.execute("SELECT id, message_id, content, created_at FROM posts ORDER BY created_at DESC LIMIT ?", (limit,))
@@ -347,7 +344,7 @@ def generate_image(prompt: str) -> bytes | None:
             logger.warning(f"⚠️ Ошибка с моделью {model}: {e}")
     return None
 
-# ===================== ОТПРАВКА В TELEGRAM =====================
+# ===================== ОТПРАВКА В TELEGRAM (с fallback без форматирования) =====================
 async def send_telegram_photo(chat_id: int, photo_bytes: bytes, caption: str, bot: Bot) -> tuple[bool, int | None]:
     MAX_CAPTION = 1024
     if len(caption) <= MAX_CAPTION:
@@ -355,16 +352,30 @@ async def send_telegram_photo(chat_id: int, photo_bytes: bytes, caption: str, bo
             msg = await bot.send_photo(chat_id=chat_id, photo=photo_bytes, caption=caption, parse_mode="MarkdownV2")
             return True, msg.message_id
         except TelegramError as e:
-            logger.error(f"Ошибка отправки фото: {e}")
-            return False, None
+            if "can't parse entities" in str(e).lower():
+                logger.warning("Ошибка парсинга Markdown в подписи к фото, пробую без форматирования")
+                try:
+                    msg = await bot.send_photo(chat_id=chat_id, photo=photo_bytes, caption=caption)
+                    return True, msg.message_id
+                except Exception as e2:
+                    logger.error(f"Ошибка отправки фото без форматирования: {e2}")
+                    return False, None
+            else:
+                logger.error(f"Ошибка отправки фото: {e}")
+                return False, None
     else:
         logger.info(f"Подпись длиной {len(caption)} превышает лимит, отправляю фото без подписи, текст отдельно.")
         try:
+            # Отправляем фото без подписи
             msg_photo = await bot.send_photo(chat_id=chat_id, photo=photo_bytes)
-            await bot.send_message(chat_id=chat_id, text=caption, parse_mode="MarkdownV2")
-            return True, msg_photo.message_id
-        except TelegramError as e:
-            logger.error(f"Ошибка отправки: {e}")
+            # Текст отправляем отдельным сообщением (с fallback)
+            success, _ = await send_telegram_message(chat_id, caption, bot)
+            if success:
+                return True, msg_photo.message_id
+            else:
+                return False, None
+        except Exception as e:
+            logger.error(f"Ошибка отправки фото/текста: {e}")
             return False, None
 
 async def send_telegram_message(chat_id: int, text: str, bot: Bot) -> tuple[bool, int | None]:
@@ -372,8 +383,17 @@ async def send_telegram_message(chat_id: int, text: str, bot: Bot) -> tuple[bool
         msg = await bot.send_message(chat_id=chat_id, text=text, parse_mode="MarkdownV2")
         return True, msg.message_id
     except TelegramError as e:
-        logger.error(f"Ошибка отправки сообщения: {e}")
-        return False, None
+        if "can't parse entities" in str(e).lower():
+            logger.warning("Ошибка парсинга Markdown, отправляю без форматирования")
+            try:
+                msg = await bot.send_message(chat_id=chat_id, text=text)
+                return True, msg.message_id
+            except Exception as e2:
+                logger.error(f"Ошибка отправки без форматирования: {e2}")
+                return False, None
+        else:
+            logger.error(f"Ошибка отправки сообщения: {e}")
+            return False, None
 
 # ===================== УДАЛЕНИЕ ДУБЛИКАТА ФОТО ИЗ ГРУППЫ (БЭД) =====================
 async def delete_duplicate_from_group(photo_message_id: int, post_text: str, bot: Bot):
@@ -461,7 +481,6 @@ def generate_post(news_list):
             continue
     return "❌ Не удалось сгенерировать пост."
 
-# ===================== ГЕНЕРАЦИЯ ОТВЕТА НА КОММЕНТАРИЙ (ГУД) =====================
 def generate_reply(comment_text: str, post_content: str) -> str:
     global ai_client
     prompt = f"""
@@ -485,10 +504,9 @@ def generate_reply(comment_text: str, post_content: str) -> str:
         except Exception as e:
             logger.warning(f"Модель {model} ошибка: {e}")
             continue
-    # Запасной ответ, если все модели недоступны
     return "Спасибо за комментарий! 👍 Обязательно отвечу подробнее позже."
 
-# ===================== ПРОВЕРКА КОММЕНТАРИЕВ (ГУД) =====================
+# ===================== ПРОВЕРКА КОММЕНТАРИЕВ (с улучшенной диагностикой) =====================
 async def check_and_reply_to_comments(bot: Bot):
     logger.info("💬 Проверяю комментарии к последним 5 постам...")
     
@@ -504,7 +522,9 @@ async def check_and_reply_to_comments(bot: Bot):
     logger.info(f"Текущий offset комментариев: {offset}")
     
     try:
-        updates = await bot.get_updates(offset=offset, limit=100, timeout=10, allowed_updates=["message"])
+        # Увеличиваем timeout до 30 секунд, limit до 100
+        updates = await bot.get_updates(offset=offset, limit=100, timeout=30, allowed_updates=["message"])
+        logger.info(f"Получено обновлений: {len(updates)}")
     except Exception as e:
         logger.error(f"Ошибка получения обновлений: {e}")
         return
@@ -512,21 +532,18 @@ async def check_and_reply_to_comments(bot: Bot):
     max_id = offset - 1
     processed_count = 0
     
-    # Диагностика видимых чатов (логирование БЭД)
-    seen_chats = set()
+    # Диагностика всех сообщений
     for update in updates:
         if update.message:
             chat = update.message.chat
-            seen_chats.add(f"{chat.id} ({chat.type})")
-    if seen_chats:
-        logger.info(f"Бот видит чаты: {', '.join(seen_chats)}")
-    else:
-        logger.warning("Бот не видит ни одного чата (нет сообщений).")
+            msg_text = update.message.text or update.message.caption or "[без текста]"
+            logger.info(f"Обновление {update.update_id}: чат={chat.id} ({chat.type}), текст={msg_text[:50]}...")
     
+    # Фильтрация по группе комментариев
     if COMMENTS_CHAT_ID:
         logger.info(f"Ожидаемый чат для комментариев: {COMMENTS_CHAT_ID}")
     else:
-        logger.warning("COMMENTS_CHAT_ID не задан! Проверьте TG_GROUP_ID или TG_CHAT_ID")
+        logger.warning("COMMENTS_CHAT_ID не задан!")
     
     for update in updates:
         if update.update_id > max_id:
@@ -570,17 +587,27 @@ async def check_and_reply_to_comments(bot: Bot):
                     parse_mode="MarkdownV2"
                 )
                 logger.info(f"✅ Отправлен ответ на комментарий {comment_id}")
-                # ТОЛЬКО при успешной отправке помечаем как обработанный
                 mark_comment_processed(comment_id, replied_post['id'])
                 processed_count += 1
             except Exception as e:
                 logger.error(f"Не удалось отправить ответ: {e}")
-                # Не помечаем — пусть попробует в следующий раз
+                # Если ошибка парсинга, пробуем отправить без форматирования
+                if "can't parse entities" in str(e).lower():
+                    try:
+                        await bot.send_message(
+                            chat_id=msg.chat_id,
+                            text=reply_text,
+                            reply_to_message_id=comment_id
+                        )
+                        logger.info(f"✅ Ответ отправлен без форматирования")
+                        mark_comment_processed(comment_id, replied_post['id'])
+                        processed_count += 1
+                    except Exception as e2:
+                        logger.error(f"Не удалось отправить ответ без форматирования: {e2}")
         else:
             logger.warning(f"Не удалось сгенерировать ответ на комментарий {comment_id}")
-            # Не помечаем — возможно, модель временно недоступна
     
-    # Сохраняем новый offset (как в ГУД)
+    # Сохраняем новый offset
     if max_id >= offset:
         save_comments_offset(max_id + 1)
     
@@ -606,9 +633,9 @@ async def check_creator_messages(bot: Bot):
                 elif text.startswith("/stats"):
                     posts = get_recent_posts(10)
                     stats = f"📊 Постов: {len(posts)}"
-                    await send_telegram_message(CREATOR_ID, stats, bot)
+                    await bot.send_message(chat_id=CREATOR_ID, text=stats)  # без форматирования
                 else:
-                    await send_telegram_message(CREATOR_ID, f"✅ Получено: {text}", bot)
+                    await bot.send_message(chat_id=CREATOR_ID, text=f"Получено: {text}")
         if max_id >= offset:
             save_creator_offset(max_id + 1)
     except Exception as e:
@@ -620,13 +647,13 @@ async def publish_new_post(bot: Bot):
     try:
         news_list = fetch_fresh_news(limit=5)
         if not news_list:
-            await send_telegram_message(CREATOR_ID, "❌ Нет новых новостей для публикации.", bot)
+            await bot.send_message(chat_id=CREATOR_ID, text="Нет новых новостей")
             return
         top_news = news_list[0]
         logger.info(f"🏆 Главная новость: {top_news['title'][:80]}...")
         post_content = generate_post(news_list)
         if not post_content or post_content.startswith("❌"):
-            await send_telegram_message(CREATOR_ID, f"❌ Ошибка генерации: {post_content}", bot)
+            await bot.send_message(chat_id=CREATOR_ID, text=f"Ошибка генерации: {post_content}")
             return
         image = search_pexels_image(top_news['title'])
         if not image and HF_API_TOKEN:
@@ -639,9 +666,9 @@ async def publish_new_post(bot: Bot):
                 save_post(msg_id, post_content)
                 for news in news_list:
                     save_published_news(news['link'], news['title'])
-                await send_telegram_message(CREATOR_ID, "✅ Пост опубликован!", bot)
+                await bot.send_message(chat_id=CREATOR_ID, text="Пост опубликован")
             else:
-                await send_telegram_message(CREATOR_ID, "❌ Ошибка публикации фото.", bot)
+                await bot.send_message(chat_id=CREATOR_ID, text="Ошибка публикации фото")
         else:
             logger.info("⚠️ Не удалось получить изображение, отправляю только текст.")
             success, msg_id = await send_telegram_message(int(TG_CHANNEL_ID), post_content, bot)
@@ -649,13 +676,30 @@ async def publish_new_post(bot: Bot):
                 save_post(msg_id, post_content)
                 for news in news_list:
                     save_published_news(news['link'], news['title'])
-                await send_telegram_message(CREATOR_ID, "✅ Пост опубликован (без фото).", bot)
+                await bot.send_message(chat_id=CREATOR_ID, text="Пост опубликован (без фото)")
             else:
-                await send_telegram_message(CREATOR_ID, "❌ Ошибка публикации текста.", bot)
+                await bot.send_message(chat_id=CREATOR_ID, text="Ошибка публикации текста")
     except Exception as e:
-        error_msg = f"❌ Критическая ошибка: {str(e)}"
+        error_msg = f"Критическая ошибка: {str(e)}"
         logger.error(error_msg)
-        await send_telegram_message(CREATOR_ID, error_msg, bot)
+        await bot.send_message(chat_id=CREATOR_ID, text=error_msg)
+
+# ===================== ОЧИСТКА WEBHOOK ПРИ ЗАПУСКЕ =====================
+def delete_webhook_if_exists(token: str):
+    """Проверяет и удаляет webhook, чтобы getUpdates работал."""
+    url = f"https://api.telegram.org/bot{token}/deleteWebhook"
+    try:
+        resp = requests.get(url, timeout=10)
+        if resp.status_code == 200:
+            data = resp.json()
+            if data.get("ok"):
+                logger.info("✅ Webhook удален (или уже отсутствовал).")
+            else:
+                logger.warning(f"⚠️ Ответ от deleteWebhook: {data}")
+        else:
+            logger.warning(f"⚠️ Не удалось удалить webhook, статус: {resp.status_code}")
+    except Exception as e:
+        logger.error(f"❌ Ошибка при удалении webhook: {e}")
 
 # ===================== MAIN (СТРУКТУРА ГУД) =====================
 async def run_all(bot: Bot):
@@ -670,6 +714,10 @@ async def run_check(bot: Bot):
 
 def main():
     logger.info("🚀 Запуск бота...")
+    
+    # 1. Удаляем webhook, чтобы getUpdates работал
+    delete_webhook_if_exists(TG_BOT_TOKEN)
+    
     init_db()
     clean_old_news()
     
