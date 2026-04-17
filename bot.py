@@ -14,8 +14,9 @@ from urllib3.util.retry import Retry
 from huggingface_hub import InferenceClient
 from telegram import Bot
 from telegram.error import TelegramError
+from groq import Groq  # новый импорт
 
-# ===================== НАСТРОЙКА ЛОГИРОВАНИЯ (БЭД) =====================
+# ===================== НАСТРОЙКА ЛОГИРОВАНИЯ =====================
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s'
@@ -29,6 +30,7 @@ TG_CHANNEL_ID = os.getenv("TG_CHAT_ID")
 TG_GROUP_ID = os.getenv("TG_GROUP_ID")
 CREATOR_ID = int(os.getenv("CREATOR_ID", "0"))
 PEXELS_API_KEY = os.getenv("PEXELS_API_KEY")
+GROQ_API_KEY = os.getenv("GROQ_API_KEY")  # новый ключ
 
 TEST_MODE = os.getenv("TEST_MODE", "false").lower() == "true"
 
@@ -65,7 +67,7 @@ CLOSINGS = [
     "Следите за обновлениями, впереди ещё много интересного! 🔥"
 ]
 
-# ===================== SYSTEM_PROMPT (с инструкцией экранирования MarkdownV2) =====================
+# ===================== SYSTEM_PROMPT (с инструкцией по экранированию MarkdownV2) =====================
 SYSTEM_PROMPT = """
 Ты — опытный Python-разработчик и автор IT-канала. Твой стиль — живой, с юмором, иногда с лёгкой иронией. Ты обожаешь программирование, нейросети и всё, что связано с технологиями. Ты не любишь цифровой контроль и мессенджер Max (от VK), но не выражаешь это открыто — только лёгкий сарказм в новостях на эту тему. 
 
@@ -74,7 +76,7 @@ SYSTEM_PROMPT = """
 Твоя задача: на основе предоставленных новостей написать пост для Telegram-канала.
 
 Требования:
-- Используй Markdown (MarkdownV2). Внимание: все специальные символы должны быть экранированы обратным слешем (\), кроме тех, что являются частью разметки (например, **жирный**, __курсив__, ссылки). Экранируй точки, восклицательные знаки, скобки и т.п. в обычном тексте.
+- Используй Markdown, не забывай экранировать специальные символы (\. \! \# и т.д.) во всём тексте, кроме служебных символов разметки.
 - Кратко перескажи каждую новость (2-3 предложения), своими словами, не повторяя заголовок.
 - Если новость про Python, нейросети или программирование — добавь немного энтузиазма (эмодзи(😎🤔😏🙄😴🤑🤠🦾👁👀👩🏻‍💻💻), восклицания).
 - Если новость про Max — можешь легонько подколоть (например если статья а том что макс цнлый час небыл достпен :  «Max опять сбоит, что тут удивительного!»), но без прямой агрессии.
@@ -82,19 +84,22 @@ SYSTEM_PROMPT = """
 - Пиши на русском языке.
 - В конце поста добавь ссылки на источники.
 
-В Telegram доступны следующие Markdown (MarkdownV2):
-**сам ты жирный**
+В Telegram доступны следующие Markdown:
+**жирный**
 __курсив__
 `код`
-~~перечеркнутый~~
+~~зачеркнутый~~
 ```блок кода```
 ||скрытый текст||
 [ссылка](https://ya.ru/)
 
-Обязательно экранируй следующие символы в тексте (если они не являются частью разметки): _ * [ ] ( ) ~ ` > # + - = | { } . ! 
+В режиме MarkdownV2 специальные символы требуют экранирования обратным слешем: _ * [ ] ( ) ~ ` > # + - = | { } . !
+Экранируй их в тексте, но не в разметке (например, звёздочки для жирного не экранируй).
 """
 
-FALLBACK_MODELS = [
+# ===================== МОДЕЛИ =====================
+# Старые HF модели (включая платные — при ошибке 402 будут пропущены)
+HF_MODELS_LEGACY = [
     "deepseek-ai/DeepSeek-V3",
     "Qwen/Qwen2.5-7B-Instruct",
     "meta-llama/Llama-3.1-8B-Instruct",
@@ -102,6 +107,25 @@ FALLBACK_MODELS = [
     "mistralai/Mistral-7B-Instruct-v0.3"
 ]
 
+# Новые бесплатные HF модели (запасные)
+HF_MODELS_FREE = [
+    "mistralai/Mistral-7B-Instruct-v0.2",
+    "HuggingFaceH4/zephyr-7b-beta",
+    "google/gemma-2b-it"
+]
+
+# Объединённый список для перебора (сначала старые, потом бесплатные)
+FALLBACK_MODELS = HF_MODELS_LEGACY + HF_MODELS_FREE
+
+# Модели Groq (бесплатные квоты)
+GROQ_MODELS = [
+    "llama-3.3-70b-versatile",
+    "llama3-70b-8192",
+    "mixtral-8x7b-32768",
+    "gemma2-9b-it"
+]
+
+# Модели для генерации изображений (Hugging Face)
 IMAGE_MODELS = [
     "cutycat2000/InterDiffusion-2.5",
     "cutycat2000x/InterDiffusion-3.5",
@@ -226,6 +250,20 @@ def save_creator_offset(offset):
         f.write(str(offset))
     logger.info(f"💾 Сохранён offset создателя: {offset}")
 
+# ===================== УДАЛЕНИЕ WEBHOOK ПРИ СТАРТЕ =====================
+def delete_webhook():
+    if not TG_BOT_TOKEN:
+        return
+    try:
+        url = f"https://api.telegram.org/bot{TG_BOT_TOKEN}/deleteWebhook"
+        resp = requests.get(url, timeout=10)
+        if resp.status_code == 200 and resp.json().get("ok"):
+            logger.info("✅ Webhook удален (или уже отсутствовал).")
+        else:
+            logger.warning(f"⚠️ Не удалось удалить webhook: {resp.text}")
+    except Exception as e:
+        logger.warning(f"⚠️ Ошибка при удалении webhook: {e}")
+
 # ===================== НОВОСТИ =====================
 def parse_rss_date(entry):
     if hasattr(entry, 'published_parsed') and entry.published_parsed:
@@ -344,7 +382,7 @@ def generate_image(prompt: str) -> bytes | None:
             logger.warning(f"⚠️ Ошибка с моделью {model}: {e}")
     return None
 
-# ===================== ОТПРАВКА В TELEGRAM (с fallback без форматирования) =====================
+# ===================== ОТПРАВКА В TELEGRAM (с fallback) =====================
 async def send_telegram_photo(chat_id: int, photo_bytes: bytes, caption: str, bot: Bot) -> tuple[bool, int | None]:
     MAX_CAPTION = 1024
     if len(caption) <= MAX_CAPTION:
@@ -366,9 +404,7 @@ async def send_telegram_photo(chat_id: int, photo_bytes: bytes, caption: str, bo
     else:
         logger.info(f"Подпись длиной {len(caption)} превышает лимит, отправляю фото без подписи, текст отдельно.")
         try:
-            # Отправляем фото без подписи
             msg_photo = await bot.send_photo(chat_id=chat_id, photo=photo_bytes)
-            # Текст отправляем отдельным сообщением (с fallback)
             success, _ = await send_telegram_message(chat_id, caption, bot)
             if success:
                 return True, msg_photo.message_id
@@ -395,7 +431,7 @@ async def send_telegram_message(chat_id: int, text: str, bot: Bot) -> tuple[bool
             logger.error(f"Ошибка отправки сообщения: {e}")
             return False, None
 
-# ===================== УДАЛЕНИЕ ДУБЛИКАТА ФОТО ИЗ ГРУППЫ (БЭД) =====================
+# ===================== УДАЛЕНИЕ ДУБЛИКАТА ФОТО ИЗ ГРУППЫ =====================
 async def delete_duplicate_from_group(photo_message_id: int, post_text: str, bot: Bot):
     if not TG_GROUP_ID:
         return
@@ -422,7 +458,6 @@ async def delete_duplicate_from_group(photo_message_id: int, post_text: str, bot
             if not msg or msg.chat_id != int(TG_GROUP_ID):
                 continue
 
-            # Более мягкая проверка дубликата
             if msg.photo:
                 caption = (msg.caption or "").strip()
                 if caption and (post_text[:120] in caption or caption[:120] in post_text):
@@ -439,16 +474,71 @@ async def delete_duplicate_from_group(photo_message_id: int, post_text: str, bot
     except Exception as e:
         logger.error(f"Ошибка при поиске дубликата: {e}", exc_info=True)
 
-# ===================== ГЕНЕРАЦИЯ ТЕКСТА =====================
-ai_client = None
+# ===================== ГЕНЕРАЦИЯ ТЕКСТА (Groq + HF) =====================
+ai_client = None  # для Hugging Face
 
-def generate_post(news_list):
+def generate_with_groq(prompt: str, max_tokens: int = 800) -> str | None:
+    """Генерация через Groq API (бесплатные квоты)."""
+    if not GROQ_API_KEY:
+        return None
+    try:
+        client = Groq(api_key=GROQ_API_KEY)
+        for model in GROQ_MODELS:
+            try:
+                logger.info(f"🔄 Пробую Groq модель: {model}")
+                completion = client.chat.completions.create(
+                    model=model,
+                    messages=[{"role": "user", "content": prompt}],
+                    max_tokens=max_tokens,
+                    temperature=0.8,
+                )
+                result = completion.choices[0].message.content.strip()
+                if result:
+                    logger.info(f"✅ Успешно сгенерировано через Groq {model}")
+                    return result
+            except Exception as e:
+                logger.warning(f"⚠️ Ошибка Groq с моделью {model}: {e}")
+                continue
+    except Exception as e:
+        logger.error(f"Ошибка инициализации Groq: {e}")
+    return None
+
+def generate_with_hf(prompt: str, max_tokens: int = 800) -> str | None:
+    """Генерация через Hugging Face Inference API."""
     global ai_client
-    logger.info("🤖 Генерирую пост...")
     if not HF_API_TOKEN:
-        return "❌ Ошибка: нет токена HF"
+        return None
     if ai_client is None:
         ai_client = InferenceClient(api_key=HF_API_TOKEN, provider="auto")
+    for model in FALLBACK_MODELS:
+        try:
+            logger.info(f"🔄 Пробую HF модель: {model}")
+            completion = ai_client.chat.completions.create(
+                model=model,
+                messages=[{"role": "user", "content": prompt}],
+                max_tokens=max_tokens,
+                temperature=0.8,
+            )
+            result = completion.choices[0].message.content.strip()
+            if result:
+                logger.info(f"✅ Успешно сгенерировано с помощью {model}")
+                return result
+        except Exception as e:
+            error_msg = str(e)
+            if "402" in error_msg or "Payment Required" in error_msg:
+                logger.warning(f"⚠️ Модель {model} требует оплату, пропускаем.")
+            elif "model_not_supported" in error_msg:
+                logger.warning(f"⚠️ Модель {model} не поддерживается, пропускаем.")
+            else:
+                logger.warning(f"⚠️ Ошибка с моделью {model}: {e}")
+            continue
+    return None
+
+def generate_post(news_list):
+    logger.info("🤖 Генерирую пост...")
+    if not HF_API_TOKEN and not GROQ_API_KEY:
+        return "❌ Ошибка: нет ни HF_API_TOKEN, ни GROQ_API_KEY"
+    
     random_greeting = random.choice(GREETINGS)
     random_closing = random.choice(CLOSINGS)
     news_context = "\n\n".join([
@@ -463,50 +553,38 @@ def generate_post(news_list):
 
 Напиши пост. Начни: "{random_greeting}". Перескажи новости. В конце: "{random_closing}"
 """
-    for model in FALLBACK_MODELS:
-        try:
-            logger.info(f"🔄 Пробую модель: {model}")
-            completion = ai_client.chat.completions.create(
-                model=model,
-                messages=[{"role": "user", "content": prompt}],
-                max_tokens=800,
-                temperature=0.8,
-            )
-            result = completion.choices[0].message.content.strip()
-            if result:
-                logger.info(f"✅ Успешно сгенерировано с помощью {model}")
-                return result
-        except Exception as e:
-            logger.warning(f"⚠️ Ошибка с моделью {model}: {e}")
-            continue
+    # 1. Пробуем Groq (если есть ключ)
+    result = generate_with_groq(prompt, max_tokens=800)
+    if result:
+        return result
+
+    # 2. Пробуем Hugging Face
+    result = generate_with_hf(prompt, max_tokens=800)
+    if result:
+        return result
+
     return "❌ Не удалось сгенерировать пост."
 
 def generate_reply(comment_text: str, post_content: str) -> str:
-    global ai_client
     prompt = f"""
 Ты — автор IT-канала. Подписчик: "{comment_text}"
 Пост был о: {post_content[:500]}
 Ответь дружелюбно, с юмором (2-3 предложения). Если про Max — легкая ирония.
 """
-    for model in FALLBACK_MODELS:
-        try:
-            if ai_client is None:
-                ai_client = InferenceClient(api_key=HF_API_TOKEN, provider="auto")
-            completion = ai_client.chat.completions.create(
-                model=model,
-                messages=[{"role": "user", "content": prompt}],
-                max_tokens=200,
-                temperature=0.8,
-            )
-            result = completion.choices[0].message.content.strip()
-            if result:
-                return result
-        except Exception as e:
-            logger.warning(f"Модель {model} ошибка: {e}")
-            continue
+    # 1. Groq
+    result = generate_with_groq(prompt, max_tokens=200)
+    if result:
+        return result
+
+    # 2. Hugging Face
+    result = generate_with_hf(prompt, max_tokens=200)
+    if result:
+        return result
+
+    # 3. Fallback
     return "Спасибо за комментарий! 👍 Обязательно отвечу подробнее позже."
 
-# ===================== ПРОВЕРКА КОММЕНТАРИЕВ (с улучшенной диагностикой) =====================
+# ===================== ПРОВЕРКА КОММЕНТАРИЕВ =====================
 async def check_and_reply_to_comments(bot: Bot):
     logger.info("💬 Проверяю комментарии к последним 5 постам...")
     
@@ -522,9 +600,7 @@ async def check_and_reply_to_comments(bot: Bot):
     logger.info(f"Текущий offset комментариев: {offset}")
     
     try:
-        # Увеличиваем timeout до 30 секунд, limit до 100
-        updates = await bot.get_updates(offset=offset, limit=100, timeout=30, allowed_updates=["message"])
-        logger.info(f"Получено обновлений: {len(updates)}")
+        updates = await bot.get_updates(offset=offset, limit=100, timeout=10, allowed_updates=["message"])
     except Exception as e:
         logger.error(f"Ошибка получения обновлений: {e}")
         return
@@ -532,18 +608,21 @@ async def check_and_reply_to_comments(bot: Bot):
     max_id = offset - 1
     processed_count = 0
     
-    # Диагностика всех сообщений
+    # Диагностика
+    seen_chats = set()
     for update in updates:
         if update.message:
             chat = update.message.chat
-            msg_text = update.message.text or update.message.caption or "[без текста]"
-            logger.info(f"Обновление {update.update_id}: чат={chat.id} ({chat.type}), текст={msg_text[:50]}...")
+            seen_chats.add(f"{chat.id} ({chat.type})")
+    if seen_chats:
+        logger.info(f"Бот видит чаты: {', '.join(seen_chats)}")
+    else:
+        logger.warning("Бот не видит ни одного чата (нет сообщений).")
     
-    # Фильтрация по группе комментариев
     if COMMENTS_CHAT_ID:
         logger.info(f"Ожидаемый чат для комментариев: {COMMENTS_CHAT_ID}")
     else:
-        logger.warning("COMMENTS_CHAT_ID не задан!")
+        logger.warning("COMMENTS_CHAT_ID не задан! Проверьте TG_GROUP_ID или TG_CHAT_ID")
     
     for update in updates:
         if update.update_id > max_id:
@@ -553,11 +632,9 @@ async def check_and_reply_to_comments(bot: Bot):
         if not msg:
             continue
         
-        # Фильтр по нужному чату
         if COMMENTS_CHAT_ID and msg.chat_id != COMMENTS_CHAT_ID:
             continue
         
-        # Ответ на сообщение
         reply_to = msg.reply_to_message
         if not reply_to:
             continue
@@ -590,8 +667,6 @@ async def check_and_reply_to_comments(bot: Bot):
                 mark_comment_processed(comment_id, replied_post['id'])
                 processed_count += 1
             except Exception as e:
-                logger.error(f"Не удалось отправить ответ: {e}")
-                # Если ошибка парсинга, пробуем отправить без форматирования
                 if "can't parse entities" in str(e).lower():
                     try:
                         await bot.send_message(
@@ -599,15 +674,16 @@ async def check_and_reply_to_comments(bot: Bot):
                             text=reply_text,
                             reply_to_message_id=comment_id
                         )
-                        logger.info(f"✅ Ответ отправлен без форматирования")
+                        logger.info(f"✅ Отправлен ответ без форматирования на комментарий {comment_id}")
                         mark_comment_processed(comment_id, replied_post['id'])
                         processed_count += 1
                     except Exception as e2:
-                        logger.error(f"Не удалось отправить ответ без форматирования: {e2}")
+                        logger.error(f"Не удалось отправить ответ: {e2}")
+                else:
+                    logger.error(f"Не удалось отправить ответ: {e}")
         else:
             logger.warning(f"Не удалось сгенерировать ответ на комментарий {comment_id}")
     
-    # Сохраняем новый offset
     if max_id >= offset:
         save_comments_offset(max_id + 1)
     
@@ -633,9 +709,9 @@ async def check_creator_messages(bot: Bot):
                 elif text.startswith("/stats"):
                     posts = get_recent_posts(10)
                     stats = f"📊 Постов: {len(posts)}"
-                    await bot.send_message(chat_id=CREATOR_ID, text=stats)  # без форматирования
+                    await bot.send_message(chat_id=CREATOR_ID, text=stats)
                 else:
-                    await bot.send_message(chat_id=CREATOR_ID, text=f"Получено: {text}")
+                    await bot.send_message(chat_id=CREATOR_ID, text=f"✅ Получено: {text}")
         if max_id >= offset:
             save_creator_offset(max_id + 1)
     except Exception as e:
@@ -647,13 +723,13 @@ async def publish_new_post(bot: Bot):
     try:
         news_list = fetch_fresh_news(limit=5)
         if not news_list:
-            await bot.send_message(chat_id=CREATOR_ID, text="Нет новых новостей")
+            await bot.send_message(chat_id=CREATOR_ID, text="❌ Нет новых новостей для публикации.")
             return
         top_news = news_list[0]
         logger.info(f"🏆 Главная новость: {top_news['title'][:80]}...")
         post_content = generate_post(news_list)
         if not post_content or post_content.startswith("❌"):
-            await bot.send_message(chat_id=CREATOR_ID, text=f"Ошибка генерации: {post_content}")
+            await bot.send_message(chat_id=CREATOR_ID, text=f"❌ Ошибка генерации: {post_content}")
             return
         image = search_pexels_image(top_news['title'])
         if not image and HF_API_TOKEN:
@@ -684,24 +760,7 @@ async def publish_new_post(bot: Bot):
         logger.error(error_msg)
         await bot.send_message(chat_id=CREATOR_ID, text=error_msg)
 
-# ===================== ОЧИСТКА WEBHOOK ПРИ ЗАПУСКЕ =====================
-def delete_webhook_if_exists(token: str):
-    """Проверяет и удаляет webhook, чтобы getUpdates работал."""
-    url = f"https://api.telegram.org/bot{token}/deleteWebhook"
-    try:
-        resp = requests.get(url, timeout=10)
-        if resp.status_code == 200:
-            data = resp.json()
-            if data.get("ok"):
-                logger.info("✅ Webhook удален (или уже отсутствовал).")
-            else:
-                logger.warning(f"⚠️ Ответ от deleteWebhook: {data}")
-        else:
-            logger.warning(f"⚠️ Не удалось удалить webhook, статус: {resp.status_code}")
-    except Exception as e:
-        logger.error(f"❌ Ошибка при удалении webhook: {e}")
-
-# ===================== MAIN (СТРУКТУРА ГУД) =====================
+# ===================== MAIN =====================
 async def run_all(bot: Bot):
     logger.info("🔄 Выполняю все задачи: публикация + комментарии + команды")
     await publish_new_post(bot)
@@ -714,10 +773,7 @@ async def run_check(bot: Bot):
 
 def main():
     logger.info("🚀 Запуск бота...")
-    
-    # 1. Удаляем webhook, чтобы getUpdates работал
-    delete_webhook_if_exists(TG_BOT_TOKEN)
-    
+    delete_webhook()
     init_db()
     clean_old_news()
     
