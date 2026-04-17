@@ -46,6 +46,7 @@ jobs:
           pip install feedparser
           pip install tzdata
           pip install python-telegram-bot==20.7
+          pip install groq
           
       - name: Run Bot
         env:
