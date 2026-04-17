@@ -15,7 +15,7 @@ from huggingface_hub import InferenceClient
 from telegram import Bot
 from telegram.error import TelegramError
 
-# ===================== НАСТРОЙКА ЛОГИРОВАНИЯ =====================
+# ===================== НАСТРОЙКА ЛОГИРОВАНИЯ (БЭД) =====================
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s'
@@ -65,6 +65,7 @@ CLOSINGS = [
     "Следите за обновлениями, впереди ещё много интересного! 🔥"
 ]
 
+# ===================== SYSTEM_PROMPT (БЭД) =====================
 SYSTEM_PROMPT = """
 Ты — опытный Python-разработчик и автор IT-канала. Твой стиль — живой, с юмором, иногда с лёгкой иронией. Ты обожаешь программирование, нейросети и всё, что связано с технологиями. Ты не любишь цифровой контроль и мессенджер Max (от VK), но не выражаешь это открыто — только лёгкий сарказм в новостях на эту тему. 
 
@@ -100,14 +101,13 @@ FALLBACK_MODELS = [
     "mistralai/Mistral-7B-Instruct-v0.3"
 ]
 
-# Список моделей из второй версии (более актуальные)
 IMAGE_MODELS = [
     "cutycat2000/InterDiffusion-2.5",
     "cutycat2000x/InterDiffusion-3.5",
     "cutycat2000x/InterDiffusion-4.04",
 ]
 
-# ===================== HTTP СЕССИЯ ДЛЯ НОВОСТЕЙ И PEXELS =====================
+# ===================== HTTP СЕССИЯ =====================
 def create_retry_session():
     session = requests.Session()
     retries = Retry(total=3, backoff_factor=1, status_forcelist=[500, 502, 503, 504])
@@ -349,7 +349,7 @@ async def send_telegram_photo(chat_id: int, photo_bytes: bytes, caption: str, bo
     MAX_CAPTION = 1024
     if len(caption) <= MAX_CAPTION:
         try:
-            msg = await bot.send_photo(chat_id=chat_id, photo=photo_bytes, caption=caption, parse_mode="HTML")
+            msg = await bot.send_photo(chat_id=chat_id, photo=photo_bytes, caption=caption, parse_mode="MarkdownV2")
             return True, msg.message_id
         except TelegramError as e:
             logger.error(f"Ошибка отправки фото: {e}")
@@ -358,7 +358,7 @@ async def send_telegram_photo(chat_id: int, photo_bytes: bytes, caption: str, bo
         logger.info(f"Подпись длиной {len(caption)} превышает лимит, отправляю фото без подписи, текст отдельно.")
         try:
             msg_photo = await bot.send_photo(chat_id=chat_id, photo=photo_bytes)
-            await bot.send_message(chat_id=chat_id, text=caption, parse_mode="HTML")
+            await bot.send_message(chat_id=chat_id, text=caption, parse_mode="MarkdownV2")
             return True, msg_photo.message_id
         except TelegramError as e:
             logger.error(f"Ошибка отправки: {e}")
@@ -366,13 +366,13 @@ async def send_telegram_photo(chat_id: int, photo_bytes: bytes, caption: str, bo
 
 async def send_telegram_message(chat_id: int, text: str, bot: Bot) -> tuple[bool, int | None]:
     try:
-        msg = await bot.send_message(chat_id=chat_id, text=text, parse_mode="HTML")
+        msg = await bot.send_message(chat_id=chat_id, text=text, parse_mode="MarkdownV2")
         return True, msg.message_id
     except TelegramError as e:
         logger.error(f"Ошибка отправки сообщения: {e}")
         return False, None
 
-# ===================== УДАЛЕНИЕ ДУБЛИКАТА ФОТО ИЗ ГРУППЫ =====================
+# ===================== УДАЛЕНИЕ ДУБЛИКАТА ФОТО ИЗ ГРУППЫ (БЭД) =====================
 async def delete_duplicate_from_group(photo_message_id: int, post_text: str, bot: Bot):
     if not TG_GROUP_ID:
         return
@@ -415,6 +415,7 @@ async def delete_duplicate_from_group(photo_message_id: int, post_text: str, bot
 
     except Exception as e:
         logger.error(f"Ошибка при поиске дубликата: {e}", exc_info=True)
+
 # ===================== ГЕНЕРАЦИЯ ТЕКСТА =====================
 ai_client = None
 
@@ -457,12 +458,13 @@ def generate_post(news_list):
             continue
     return "❌ Не удалось сгенерировать пост."
 
+# ===================== ГЕНЕРАЦИЯ ОТВЕТА НА КОММЕНТАРИЙ (ГУД) =====================
 def generate_reply(comment_text: str, post_content: str) -> str:
     global ai_client
     prompt = f"""
 Ты — автор IT-канала. Подписчик: "{comment_text}"
 Пост был о: {post_content[:500]}
-Ответь дружелюбно, с юмором (2-3 предложения). Если про Max — легкая ирония. Ты не любишь цифровой контроль и мессенджер Max (от VK), но не выражаешь это открыто — только лёгкий сарказм в новостях на эту тему.
+Ответь дружелюбно, с юмором (2-3 предложения). Если про Max — легкая ирония.
 """
     for model in FALLBACK_MODELS:
         try:
@@ -477,125 +479,110 @@ def generate_reply(comment_text: str, post_content: str) -> str:
             result = completion.choices[0].message.content.strip()
             if result:
                 return result
-        except:
+        except Exception as e:
+            logger.warning(f"Модель {model} ошибка: {e}")
             continue
-    return None
+    # Запасной ответ, если все модели недоступны
+    return "Спасибо за комментарий! 👍 Обязательно отвечу подробнее позже."
 
-# ===================== ПРОВЕРКА КОММЕНТАРИЕВ (УЛУЧШЕННАЯ ВЕРСИЯ) =====================
-# ===================== ПРОВЕРКА КОММЕНТАРИЕВ =====================
-# ===================== ПРОВЕРКА КОММЕНТАРИЕВ (с фильтром по времени) =====================
+# ===================== ПРОВЕРКА КОММЕНТАРИЕВ (ГУД) =====================
 async def check_and_reply_to_comments(bot: Bot):
-    logger.info("💬 Проверяю комментарии к свежим постам (не старше 7 дней)...")
-
-    # === 1. Берём только свежие посты (младше 7 дней) ===
-    cutoff = (datetime.now() - timedelta(days=7)).isoformat()
+    logger.info("💬 Проверяю комментарии к последним 5 постам...")
     
-    conn = sqlite3.connect(DB_FILE)
-    c = conn.cursor()
-    c.execute("""
-        SELECT id, message_id, content, created_at 
-        FROM posts 
-        WHERE created_at >= ? 
-        ORDER BY created_at DESC 
-        LIMIT 15
-    """, (cutoff,))
-    rows = c.fetchall()
-    conn.close()
-
-    if not rows:
-        logger.info("Нет свежих постов младше 7 дней для проверки комментариев.")
+    last_posts = get_last_posts(limit=5)
+    if not last_posts:
+        logger.info("Нет постов для проверки комментариев.")
         return
-
-    last_posts = [
-        {"id": r[0], "message_id": r[1], "content": r[2], "created_at": r[3]} 
-        for r in rows
-    ]
+    
     post_ids = {post['message_id']: post for post in last_posts}
-
+    logger.info(f"Ожидаемые ID постов: {list(post_ids.keys())}")
+    
     offset = get_comments_offset()
-    logger.info(f"Найдено свежих постов: {len(last_posts)} | offset комментариев: {offset}")
-
+    logger.info(f"Текущий offset комментариев: {offset}")
+    
+    try:
+        updates = await bot.get_updates(offset=offset, limit=100, timeout=10, allowed_updates=["message"])
+    except Exception as e:
+        logger.error(f"Ошибка получения обновлений: {e}")
+        return
+    
     max_id = offset - 1
     processed_count = 0
-
-    try:
-        # Даём Telegram время на доставку новых сообщений
-        await asyncio.sleep(10)
-
-        updates = await bot.get_updates(
-            offset=offset,
-            limit=100,
-            timeout=20,
-            allowed_updates=["message"]
-        )
-
-        logger.info(f"Получено обновлений от Telegram: {len(updates)}")
-
-        for update in updates:
-            if update.update_id > max_id:
-                max_id = update.update_id
-
-            msg = update.message
-            if not msg:
-                continue
-
-            # Проверяем, что сообщение из нужной группы
-            if COMMENTS_CHAT_ID and msg.chat_id != COMMENTS_CHAT_ID:
-                continue
-
-            # Проверяем, что это ответ (reply) на один из наших постов
-            if not msg.reply_to_message:
-                continue
-
-            replied_post = post_ids.get(msg.reply_to_message.message_id)
-            if not replied_post:
-                continue
-
-            comment_id = msg.message_id
-
-            # Пропускаем уже обработанные комментарии
-            if is_comment_processed(comment_id):
-                continue
-
-            comment_text = msg.text or msg.caption
-            if not comment_text:
-                continue
-
-            username = msg.from_user.username or msg.from_user.first_name or "Anonymous"
-            logger.info(f"📝 Новый комментарий от @{username} (id={comment_id}): {comment_text[:80]}...")
-
-            # === 2. Запрос к ИИ для генерации ответа ===
-            logger.info(f"🤖 Генерирую ответ на комментарий {comment_id}...")
-            reply_text = generate_reply(comment_text, replied_post['content'])
-
-            if reply_text:
-                try:
-                    await bot.send_message(
-                        chat_id=msg.chat_id,
-                        text=reply_text,
-                        reply_to_message_id=comment_id,
-                        parse_mode="HTML"
-                    )
-                    mark_comment_processed(comment_id, replied_post['id'])
-                    processed_count += 1
-                    logger.info(f"✅ Ответ на комментарий {comment_id} успешно отправлен")
-                except Exception as e:
-                    logger.error(f"❌ Ошибка отправки ответа на комментарий {comment_id}: {e}")
-            else:
-                logger.warning(f"⚠️ Не удалось сгенерировать ответ для комментария {comment_id}")
-
-    except Exception as e:
-        logger.error(f"❌ Критическая ошибка в check_and_reply_to_comments: {e}", exc_info=True)
-    finally:
-        # Всегда сохраняем offset, даже если была ошибка
-        if max_id >= offset:
-            new_offset = max_id + 1
-            save_comments_offset(new_offset)
-            logger.info(f"💾 Offset комментариев обновлён: {offset} → {new_offset}")
+    
+    # Диагностика видимых чатов (логирование БЭД)
+    seen_chats = set()
+    for update in updates:
+        if update.message:
+            chat = update.message.chat
+            seen_chats.add(f"{chat.id} ({chat.type})")
+    if seen_chats:
+        logger.info(f"Бот видит чаты: {', '.join(seen_chats)}")
+    else:
+        logger.warning("Бот не видит ни одного чата (нет сообщений).")
+    
+    if COMMENTS_CHAT_ID:
+        logger.info(f"Ожидаемый чат для комментариев: {COMMENTS_CHAT_ID}")
+    else:
+        logger.warning("COMMENTS_CHAT_ID не задан! Проверьте TG_GROUP_ID или TG_CHAT_ID")
+    
+    for update in updates:
+        if update.update_id > max_id:
+            max_id = update.update_id
+        
+        msg = update.message
+        if not msg:
+            continue
+        
+        # Фильтр по нужному чату
+        if COMMENTS_CHAT_ID and msg.chat_id != COMMENTS_CHAT_ID:
+            continue
+        
+        # Ответ на сообщение
+        reply_to = msg.reply_to_message
+        if not reply_to:
+            continue
+        
+        replied_post = post_ids.get(reply_to.message_id)
+        if not replied_post:
+            continue
+        
+        comment_id = msg.message_id
+        if is_comment_processed(comment_id):
+            continue
+        
+        comment_text = msg.text
+        if not comment_text:
+            continue
+        
+        username = msg.from_user.username or msg.from_user.first_name
+        logger.info(f"📝 Новый комментарий к посту {replied_post['message_id']} от @{username}: {comment_text[:50]}...")
+        
+        reply_text = generate_reply(comment_text, replied_post['content'])
+        if reply_text:
+            try:
+                await bot.send_message(
+                    chat_id=msg.chat_id,
+                    text=reply_text,
+                    reply_to_message_id=comment_id,
+                    parse_mode="MarkdownV2"
+                )
+                logger.info(f"✅ Отправлен ответ на комментарий {comment_id}")
+                # ТОЛЬКО при успешной отправке помечаем как обработанный
+                mark_comment_processed(comment_id, replied_post['id'])
+                processed_count += 1
+            except Exception as e:
+                logger.error(f"Не удалось отправить ответ: {e}")
+                # Не помечаем — пусть попробует в следующий раз
         else:
-            logger.info("Offset не изменился")
+            logger.warning(f"Не удалось сгенерировать ответ на комментарий {comment_id}")
+            # Не помечаем — возможно, модель временно недоступна
+    
+    # Сохраняем новый offset (как в ГУД)
+    if max_id >= offset:
+        save_comments_offset(max_id + 1)
+    
+    logger.info(f"Обработано новых комментариев: {processed_count}")
 
-        logger.info(f"✅ Всего обработано новых комментариев: {processed_count}")
 # ===================== КОМАНДЫ СОЗДАТЕЛЯ =====================
 async def check_creator_messages(bot: Bot):
     logger.info("👤 Проверяю сообщения создателя...")
@@ -650,7 +637,6 @@ async def publish_new_post(bot: Bot):
                 for news in news_list:
                     save_published_news(news['link'], news['title'])
                 await send_telegram_message(CREATOR_ID, "✅ Пост опубликован!", bot)
-                await asyncio.sleep(5)   # небольшая пауза
             else:
                 await send_telegram_message(CREATOR_ID, "❌ Ошибка публикации фото.", bot)
         else:
@@ -661,75 +647,48 @@ async def publish_new_post(bot: Bot):
                 for news in news_list:
                     save_published_news(news['link'], news['title'])
                 await send_telegram_message(CREATOR_ID, "✅ Пост опубликован (без фото).", bot)
-                await asyncio.sleep(5)   # небольшая пауза
             else:
                 await send_telegram_message(CREATOR_ID, "❌ Ошибка публикации текста.", bot)
-                await asyncio.sleep(5)   # небольшая пауза
     except Exception as e:
         error_msg = f"❌ Критическая ошибка: {str(e)}"
         logger.error(error_msg)
         await send_telegram_message(CREATOR_ID, error_msg, bot)
 
-# ===================== MAIN =====================
-async def safe_publish(bot: Bot):
-    """Публикация новостей с защитой"""
-    try:
-        logger.info("📝 Запуск публикации нового поста...")
-        await publish_new_post(bot)
-    except Exception as e:
-        logger.error(f"❌ Критическая ошибка при публикации поста: {e}", exc_info=True)
-        try:
-            await send_telegram_message(CREATOR_ID, f"❌ Ошибка публикации: {str(e)[:300]}", bot)
-        except:
-            pass  # если даже уведомление не ушло — не падаем
+# ===================== MAIN (СТРУКТУРА ГУД) =====================
+async def run_all(bot: Bot):
+    logger.info("🔄 Выполняю все задачи: публикация + комментарии + команды")
+    await publish_new_post(bot)
+    await check_and_reply_to_comments(bot)
+    await check_creator_messages(bot)
 
-async def safe_check_comments(bot: Bot):
-    """Проверка комментариев с защитой"""
-    try:
-        logger.info("💬 Запуск проверки комментариев...")
-        await check_and_reply_to_comments(bot)
-    except Exception as e:
-        logger.error(f"❌ Ошибка при проверке комментариев: {e}", exc_info=True)
+async def run_check(bot: Bot):
+    await check_and_reply_to_comments(bot)
+    await check_creator_messages(bot)
 
-async def safe_check_creator(bot: Bot):
-    try:
-        await check_creator_messages(bot)
-    except Exception as e:
-        logger.error(f"❌ Ошибка проверки команд создателя: {e}", exc_info=True)
-
-async def main():
-    logger.info("🚀 === Запуск ai_cannel_bot ===")
+def main():
+    logger.info("🚀 Запуск бота...")
     init_db()
     clean_old_news()
-
+    
     bot = Bot(token=TG_BOT_TOKEN)
-
-    try:
-        if TEST_MODE:
-            logger.info("🧪 ТЕСТОВЫЙ РЕЖИМ")
-            await safe_publish(bot)
-            await safe_check_comments(bot)
-            await safe_check_creator(bot)
-            return
-
-        now = datetime.now(IZHEVSK_TZ)
-        hour = now.hour
-        logger.info(f"🕐 Время по Ижевску: {hour}:00")
-
-        # Всегда проверяем комментарии и команды создателя
-        await safe_check_comments(bot)
-        await safe_check_creator(bot)
-
-        # Публикуем только в нужные часы
-        if hour in [9, 10, 12, 14, 16, 18]:
-            await safe_publish(bot)
-        else:
-            logger.info("⏰ Не время публикации — только проверка комментариев")
-
-    except Exception as e:
-        logger.error(f"🚨 ГЛОБАЛЬНАЯ ОШИБКА в main: {e}", exc_info=True)
-    finally:
-        logger.info("✅ === Завершение запуска бота ===\n")
+    
+    if TEST_MODE:
+        logger.info("🧪 ТЕСТОВЫЙ РЕЖИМ: публикую пост, затем проверяю комментарии и команды")
+        asyncio.run(run_all(bot))
+        return
+    
+    now = datetime.now(IZHEVSK_TZ)
+    hour = now.hour
+    logger.info(f"🕐 Текущее время по Ижевску: {now.strftime('%Y-%m-%d %H:%M:%S')}")
+    
+    if hour in [9, 10, 12, 14, 16, 18]:
+        logger.info(f"⏰ {hour}:00 — публикую пост, затем проверяю комментарии и команды")
+        asyncio.run(run_all(bot))
+    else:
+        logger.info(f"🕐 {hour}:00 — проверяю комментарии и сообщения создателя")
+        asyncio.run(run_check(bot))
+    
+    logger.info("✅ Работа завершена")
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    main()
