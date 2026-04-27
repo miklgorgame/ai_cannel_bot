@@ -15,6 +15,7 @@ from huggingface_hub import InferenceClient
 from telegram import Bot
 from telegram.error import TelegramError
 from groq import Groq  # новый импорт
+from openai import OpenAI # новый импорт
 
 # ===================== НАСТРОЙКА ЛОГИРОВАНИЯ =====================
 logging.basicConfig(
@@ -475,6 +476,97 @@ async def delete_duplicate_from_group(photo_message_id: int, post_text: str, bot
         logger.error(f"Ошибка при поиске дубликата: {e}", exc_info=True)
 
 # ===================== ГЕНЕРАЦИЯ ТЕКСТА (Groq + HF) =====================
+# ---------- НОВЫЕ ПРОВАЙДЕРЫ ----------
+def twelver_generate(prompt: str, max_tokens: int = 800) -> str | None:
+    api_key = os.getenv("TWELVER_API_KEY", "sk-55babe8f0aeea9786827ce4a1bade0c50468e3cb8b2b9d8d")
+    base_url = "https://twelver.ru/api/ai/c7e9d747-ffbe-4027-9c48-8541c5302b72/v1"
+    try:
+        client = OpenAI(api_key=api_key, base_url=base_url)
+        resp = client.chat.completions.create(
+            model="auto",
+            messages=[{"role": "user", "content": prompt}],
+            max_tokens=max_tokens,
+            temperature=0.8,
+        )
+        return resp.choices[0].message.content.strip()
+    except Exception as e:
+        logger.warning(f"Twelver error: {e}")
+        return None
+
+def dandolo_generate(prompt: str, max_tokens: int = 800) -> str | None:
+    url = "https://api.dandolo.ai/v1/chat/completions"
+    headers = {"Content-Type": "application/json"}
+    payload = {
+        "model": "llama-3.3-70b",
+        "messages": [{"role": "user", "content": prompt}],
+        "max_tokens": max_tokens,
+        "temperature": 0.8,
+    }
+    try:
+        resp = requests.post(url, json=payload, headers=headers, timeout=30)
+        if resp.status_code == 200:
+            return resp.json()["choices"][0]["message"]["content"].strip()
+        else:
+            logger.warning(f"Dandolo error {resp.status_code}: {resp.text}")
+    except Exception as e:
+        logger.warning(f"Dandolo request failed: {e}")
+    return None
+
+def unofficial_openai_generate(prompt: str, max_tokens: int = 800) -> str | None:
+    url = "https://devsdocode-openai.hf.space/chat/completions"
+    headers = {"Content-Type": "application/json"}
+    payload = {
+        "model": "gpt-4o",
+        "messages": [{"role": "user", "content": prompt}],
+        "max_tokens": max_tokens,
+        "temperature": 0.8,
+    }
+    try:
+        resp = requests.post(url, json=payload, headers=headers, timeout=30)
+        if resp.status_code == 200:
+            return resp.json()["choices"][0]["message"]["content"].strip()
+        else:
+            logger.warning(f"Unofficial OpenAI error {resp.status_code}")
+    except Exception as e:
+        logger.warning(f"Unofficial OpenAI failed: {e}")
+    return None
+
+def algion_generate(prompt: str, max_tokens: int = 800) -> str | None:
+    api_key = os.getenv("ALGION_API_KEY")
+    if not api_key:
+        return None
+    try:
+        client = OpenAI(api_key=api_key, base_url="https://api.algion.dev/v1")
+        resp = client.chat.completions.create(
+            model="gpt-4.1",
+            messages=[{"role": "user", "content": prompt}],
+            max_tokens=max_tokens,
+            temperature=0.8,
+        )
+        return resp.choices[0].message.content.strip()
+    except Exception as e:
+        logger.warning(f"Algion error: {e}")
+        return None
+
+def devtoolbox_generate(prompt: str, max_tokens: int = 800) -> str | None:
+    url = "https://api.devtoolbox.io/v1/chat/completions"
+    headers = {"Content-Type": "application/json"}
+    payload = {
+        "model": "devtoolbox-7b",
+        "messages": [{"role": "user", "content": prompt}],
+        "max_tokens": max_tokens,
+        "temperature": 0.8,
+    }
+    try:
+        resp = requests.post(url, json=payload, headers=headers, timeout=30)
+        if resp.status_code == 200:
+            return resp.json()["choices"][0]["message"]["content"].strip()
+        else:
+            logger.warning(f"DevToolbox error {resp.status_code}")
+    except Exception as e:
+        logger.warning(f"DevToolbox failed: {e}")
+    return None
+
 ai_client = None  # для Hugging Face
 
 def generate_with_groq(prompt: str, max_tokens: int = 800) -> str | None:
@@ -502,6 +594,7 @@ def generate_with_groq(prompt: str, max_tokens: int = 800) -> str | None:
     except Exception as e:
         logger.error(f"Ошибка инициализации Groq: {e}")
     return None
+
 
 def generate_with_hf(prompt: str, max_tokens: int = 800) -> str | None:
     """Генерация через Hugging Face Inference API."""
@@ -533,6 +626,40 @@ def generate_with_hf(prompt: str, max_tokens: int = 800) -> str | None:
                 logger.warning(f"⚠️ Ошибка с моделью {model}: {e}")
             continue
     return None
+
+#======================================================================================
+# Словарь всех доступных генераторов (старые + новые)
+PROVIDER_FUNCTIONS = {
+    "twelver": twelver_generate,
+    "groq": generate_with_groq,          # твоя старая функция
+    "huggingface": generate_with_hf,     # твоя старая функция
+    "dandolo": dandolo_generate,
+    "unofficial": unofficial_openai_generate,
+    "algion": algion_generate,
+    "devtoolbox": devtoolbox_generate,
+}
+
+# Порядок опроса провайдеров (можно менять через переменную окружения)
+PROVIDER_ORDER = os.getenv("PROVIDER_ORDER", "twelver,groq,huggingface,dandolo,unofficial,algion,devtoolbox").split(",")
+
+def generate_with_fallback(prompt: str, max_tokens: int = 800) -> str | None:
+    """По очереди пробует всех провайдеров, возвращает первый успешный результат."""
+    for name in PROVIDER_ORDER:
+        func = PROVIDER_FUNCTIONS.get(name.strip())
+        if not func:
+            continue
+        logger.info(f"🔄 Пробую провайдер: {name}")
+        try:
+            result = func(prompt, max_tokens)
+            if result:
+                logger.info(f"✅ Успех через {name}")
+                return result
+        except Exception as e:
+            logger.warning(f"❌ {name} выбросил исключение: {e}")
+    logger.error("❌ Все провайдеры недоступны.")
+    return None
+
+#======================================================================================
 
 def generate_post(news_list):
     logger.info("🤖 Генерирую пост...")
