@@ -716,22 +716,7 @@ async def check_and_reply_to_comments(bot: Bot):
     max_id = offset - 1
     processed_count = 0
     
-    # Диагностика
-    seen_chats = set()
-    for update in updates:
-        if update.message:
-            chat = update.message.chat
-            seen_chats.add(f"{chat.id} ({chat.type})")
-    if seen_chats:
-        logger.info(f"Бот видит чаты: {', '.join(seen_chats)}")
-    else:
-        logger.warning("Бот не видит ни одного чата (нет сообщений).")
-    
-    if COMMENTS_CHAT_ID:
-        logger.info(f"Ожидаемый чат для комментариев: {COMMENTS_CHAT_ID}")
-    else:
-        logger.warning("COMMENTS_CHAT_ID не задан! Проверьте TG_GROUP_ID или TG_CHAT_ID")
-    
+    # 👇 НОВОЕ: логируем каждое сообщение (даже если не reply)
     for update in updates:
         if update.update_id > max_id:
             max_id = update.update_id
@@ -740,23 +725,36 @@ async def check_and_reply_to_comments(bot: Bot):
         if not msg:
             continue
         
+        # Фильтруем по ID группы (если задан)
         if COMMENTS_CHAT_ID and msg.chat_id != COMMENTS_CHAT_ID:
             continue
         
+        # --- сырой лог любого сообщения ---
+        reply_info = ""
+        if msg.reply_to_message:
+            reply_info = f" | ответ на msg_id={msg.reply_to_message.message_id}"
+        text_preview = (msg.text or msg.caption or "[не текст]")[:100]
+        logger.info(f"📨 Получено сообщение: chat={msg.chat_id} msg_id={msg.message_id}{reply_info} текст={text_preview!r}")
+        
+        # Проверяем, является ли оно ответом на наш пост
         reply_to = msg.reply_to_message
         if not reply_to:
+            logger.info("   -> не ответ на сообщение, пропускаем")
             continue
         
         replied_post = post_ids.get(reply_to.message_id)
         if not replied_post:
+            logger.info(f"   -> ответ на msg_id={reply_to.message_id}, но это не наш пост (или старый)")
             continue
         
         comment_id = msg.message_id
         if is_comment_processed(comment_id):
+            logger.info(f"   -> комментарий {comment_id} уже обработан")
             continue
         
-        comment_text = msg.text
+        comment_text = msg.text or msg.caption
         if not comment_text:
+            logger.info("   -> нет текста для ответа")
             continue
         
         username = msg.from_user.username or msg.from_user.first_name
