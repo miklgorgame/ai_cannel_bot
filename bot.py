@@ -663,9 +663,9 @@ def generate_with_fallback(prompt: str, max_tokens: int = 800) -> str | None:
 
 def generate_post(news_list):
     logger.info("🤖 Генерирую пост...")
-    if not HF_API_TOKEN and not GROQ_API_KEY:
-        return "❌ Ошибка: нет ни HF_API_TOKEN, ни GROQ_API_KEY"
-    
+    if not PROVIDER_ORDER:
+        return "❌ Ошибка: нет настроенных провайдеров"
+
     random_greeting = random.choice(GREETINGS)
     random_closing = random.choice(CLOSINGS)
     news_context = "\n\n".join([
@@ -680,36 +680,17 @@ def generate_post(news_list):
 
 Напиши пост. Начни: "{random_greeting}". Перескажи новости. В конце: "{random_closing}"
 """
-    # 1. Пробуем Groq (если есть ключ)
-    result = generate_with_groq(prompt, max_tokens=800)
-    if result:
-        return result
-
-    # 2. Пробуем Hugging Face
-    result = generate_with_hf(prompt, max_tokens=800)
-    if result:
-        return result
-
-    return "❌ Не удалось сгенерировать пост."
+    result = generate_with_fallback(prompt, max_tokens=800)
+    return result if result else "❌ Не удалось сгенерировать пост."
 
 def generate_reply(comment_text: str, post_content: str) -> str:
     prompt = f"""
 Ты — автор IT-канала. Подписчик: "{comment_text}"
 Пост был о: {post_content[:500]}
-Ответь дружелюбно, с юмором (2-3 предложения). Если про Max — легкая ирония.
+Ответь дружелюбно, с юмором (2-3 предложения). Ты не любишь цифровой контроль и мессенджер Max (от VK), но не выражаешь это открыто — только лёгкий сарказм в ответах на кооментарии к этой теме.
 """
-    # 1. Groq
-    result = generate_with_groq(prompt, max_tokens=200)
-    if result:
-        return result
-
-    # 2. Hugging Face
-    result = generate_with_hf(prompt, max_tokens=200)
-    if result:
-        return result
-
-    # 3. Fallback
-    return "Спасибо за комментарий! 👍 Обязательно отвечу подробнее позже."
+    result = generate_with_fallback(prompt, max_tokens=200)
+    return result if result else "Спасибо за комментарий! 👍 Обязательно отвечу подробнее позже."
 
 # ===================== ПРОВЕРКА КОММЕНТАРИЕВ =====================
 async def check_and_reply_to_comments(bot: Bot):
