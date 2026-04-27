@@ -47,6 +47,7 @@ jobs:
           pip install tzdata
           pip install python-telegram-bot==20.7
           pip install groq
+          pip install openai
           
       - name: Run Bot
         env:
