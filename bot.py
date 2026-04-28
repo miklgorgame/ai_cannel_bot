@@ -694,73 +694,82 @@ def generate_reply(comment_text: str, post_content: str) -> str:
 
 # ===================== ПРОВЕРКА КОММЕНТАРИЕВ =====================
 async def check_and_reply_to_comments(bot: Bot):
-    logger.info("💬 Проверяю комментарии к последним 5 постам...")
-    
-    last_posts = get_last_posts(limit=5)
-    if not last_posts:
-        logger.info("Нет постов для проверки комментариев.")
-        return
-    
-    post_ids = {post['message_id']: post for post in last_posts}
-    logger.info(f"Ожидаемые ID постов: {list(post_ids.keys())}")
-    
+    logger.info("💬 Проверяю комментарии к постам...")
+
     offset = get_comments_offset()
     logger.info(f"Текущий offset комментариев: {offset}")
-    
+
     try:
         updates = await bot.get_updates(offset=offset, limit=100, timeout=10, allowed_updates=["message"])
     except Exception as e:
         logger.error(f"Ошибка получения обновлений: {e}")
         return
-    
+
     max_id = offset - 1
     processed_count = 0
-    
-    # 👇 НОВОЕ: логируем каждое сообщение (даже если не reply)
+
     for update in updates:
         if update.update_id > max_id:
             max_id = update.update_id
-        
+
         msg = update.message
         if not msg:
             continue
-        
-        # Фильтруем по ID группы (если задан)
+
+        # фильтруем по группе (если задан TG_GROUP_ID)
         if COMMENTS_CHAT_ID and msg.chat_id != COMMENTS_CHAT_ID:
             continue
-        
-        # --- сырой лог любого сообщения ---
+
+        # логируем всё, что приходит
         reply_info = ""
         if msg.reply_to_message:
             reply_info = f" | ответ на msg_id={msg.reply_to_message.message_id}"
         text_preview = (msg.text or msg.caption or "[не текст]")[:100]
         logger.info(f"📨 Получено сообщение: chat={msg.chat_id} msg_id={msg.message_id}{reply_info} текст={text_preview!r}")
-        
-        # Проверяем, является ли оно ответом на наш пост
+
         reply_to = msg.reply_to_message
         if not reply_to:
             logger.info("   -> не ответ на сообщение, пропускаем")
             continue
-        
-        replied_post = post_ids.get(reply_to.message_id)
-        if not replied_post:
-            logger.info(f"   -> ответ на msg_id={reply_to.message_id}, но это не наш пост (или старый)")
+
+        # 👇 ПРОВЕРКА, ЧТО ОТВЕТИЛИ НА ПОСТ БОТА / КАНАЛА
+        tg_channel_id = int(TG_CHANNEL_ID)
+        is_our_post = False
+
+        # случай 1: дубликат от имени канала (sender_chat)
+        if reply_to.sender_chat and reply_to.sender_chat.id == tg_channel_id:
+            is_our_post = True
+            logger.info("   -> ответ на пост канала (определён по sender_chat)")
+        # случай 2: оригинальное сообщение от самого бота (в канале так не отвечают, но на всякий случай)
+        elif reply_to.from_user and reply_to.from_user.id == bot.id:
+            is_our_post = True
+            logger.info("   -> ответ на пост бота (определён по from_user)")
+
+        if not is_our_post:
+            logger.info("   -> сообщение не от канала/бота, пропускаем")
             continue
-        
+
+        # Теперь у нас есть гарантия, что это ответ на наш пост.
+        # Можем сразу взять текст поста из reply_to (caption или text)
+        post_content = reply_to.caption or reply_to.text or ""
+        if not post_content:
+            logger.info("   -> пост не содержит текста, невозможно сгенерировать ответ")
+            continue
+
         comment_id = msg.message_id
         if is_comment_processed(comment_id):
             logger.info(f"   -> комментарий {comment_id} уже обработан")
             continue
-        
+
         comment_text = msg.text or msg.caption
         if not comment_text:
             logger.info("   -> нет текста для ответа")
             continue
-        
+
         username = msg.from_user.username or msg.from_user.first_name
-        logger.info(f"📝 Новый комментарий к посту {replied_post['message_id']} от @{username}: {comment_text[:50]}...")
-        
-        reply_text = generate_reply(comment_text, replied_post['content'])
+        logger.info(f"📝 Новый комментарий от @{username}: {comment_text[:50]}...")
+
+        reply_text = generate_reply(comment_text, post_content)
         if reply_text:
             try:
                 await bot.send_message(
@@ -770,7 +779,7 @@ async def check_and_reply_to_comments(bot: Bot):
                     parse_mode="MarkdownV2"
                 )
                 logger.info(f"✅ Отправлен ответ на комментарий {comment_id}")
-                mark_comment_processed(comment_id, replied_post['id'])
+                mark_comment_processed(comment_id, 0)  # id поста нам неважен, передадим 0
                 processed_count += 1
             except Exception as e:
                 if "can't parse entities" in str(e).lower():
@@ -781,7 +790,7 @@ async def check_and_reply_to_comments(bot: Bot):
                             reply_to_message_id=comment_id
                         )
                         logger.info(f"✅ Отправлен ответ без форматирования на комментарий {comment_id}")
-                        mark_comment_processed(comment_id, replied_post['id'])
+                        mark_comment_processed(comment_id, 0)
                         processed_count += 1
                     except Exception as e2:
                         logger.error(f"Не удалось отправить ответ: {e2}")
@@ -789,12 +798,11 @@ async def check_and_reply_to_comments(bot: Bot):
                     logger.error(f"Не удалось отправить ответ: {e}")
         else:
             logger.warning(f"Не удалось сгенерировать ответ на комментарий {comment_id}")
-    
+
     if max_id >= offset:
         save_comments_offset(max_id + 1)
-    
-    logger.info(f"Обработано новых комментариев: {processed_count}")
 
+    logger.info(f"Обработано новых комментариев: {processed_count}")
 # ===================== КОМАНДЫ СОЗДАТЕЛЯ =====================
 async def check_creator_messages(bot: Bot):
     logger.info("👤 Проверяю сообщения создателя...")
