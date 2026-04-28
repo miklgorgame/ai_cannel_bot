@@ -877,9 +877,10 @@ async def publish_new_post(bot: Bot):
 # ===================== MAIN =====================
 async def run_all(bot: Bot):
     logger.info("🔄 Выполняю все задачи: публикация + комментарии + команды")
-    await publish_new_post(bot)
+    
     await check_and_reply_to_comments(bot)
     await check_creator_messages(bot)
+    await publish_new_post(bot)
 
 async def run_check(bot: Bot):
     await check_and_reply_to_comments(bot)
