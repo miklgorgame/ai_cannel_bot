@@ -33,7 +33,7 @@ TG_GROUP_ID = os.getenv("TG_GROUP_ID")
 CREATOR_ID = int(os.getenv("CREATOR_ID", "0"))
 PEXELS_API_KEY = os.getenv("PEXELS_API_KEY")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")  # новый ключ
-QUIZ_PROBABILITY = 0.15  # 15% шанс, что после поста появится квиз
+QUIZ_PROBABILITY = 1  # 15% шанс, что после поста появится квиз
 
 TEST_MODE = os.getenv("TEST_MODE", "false").lower() == "true"
 
