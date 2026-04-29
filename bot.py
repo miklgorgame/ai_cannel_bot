@@ -16,6 +16,7 @@ from telegram import Bot
 from telegram.error import TelegramError
 from groq import Groq  # новый импорт
 from openai import OpenAI # новый импорт
+import json
 
 # ===================== НАСТРОЙКА ЛОГИРОВАНИЯ =====================
 logging.basicConfig(
@@ -32,6 +33,7 @@ TG_GROUP_ID = os.getenv("TG_GROUP_ID")
 CREATOR_ID = int(os.getenv("CREATOR_ID", "0"))
 PEXELS_API_KEY = os.getenv("PEXELS_API_KEY")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")  # новый ключ
+QUIZ_PROBABILITY = 0.15  # 15% шанс, что после поста появится квиз
 
 TEST_MODE = os.getenv("TEST_MODE", "false").lower() == "true"
 
@@ -661,6 +663,44 @@ def generate_with_fallback(prompt: str, max_tokens: int = 800) -> str | None:
 
 #======================================================================================
 
+def generate_quiz_question(news_item: dict) -> dict | None:
+    """
+    Генерирует вопрос и 4 варианта ответа для квиза.
+    Возвращает словарь {'question': ..., 'options': [...], 'correct_option_id': 0..3} или None.
+    """
+    prompt = f"""
+На основе новости составь ВОПРОС и 4 варианта ответа (один правильный) для викторины.
+Ответ должен быть СТРОГО в JSON формате:
+{{"question": "...", "options": ["...", "..."], "correct_option_id": 0}}
+Вопрос должен быть интересным, варианты — правдоподобными.
+
+Новость:
+Источник: {news_item['source']}
+Заголовок: {news_item['title']}
+Описание: {news_item['summary']}
+"""
+    result = generate_with_fallback(prompt, max_tokens=300)
+    if not result:
+        return None
+
+    # Извлекаем JSON из ответа (модель может обернуть в тройные кавычки)
+    import re
+    json_match = re.search(r'\{.*\}', result, re.DOTALL)
+    if not json_match:
+        logger.warning(f"Не удалось найти JSON в ответе модели: {result}")
+        return None
+
+    try:
+        data = json.loads(json_match.group())
+        if not all(k in data for k in ('question', 'options', 'correct_option_id')):
+            return None
+        if len(data['options']) < 2:
+            return None
+        return data
+    except json.JSONDecodeError as e:
+        logger.warning(f"Ошибка парсинга JSON для квиза: {e}")
+        return None
+
 def generate_post(news_list):
     logger.info("🤖 Генерирую пост...")
     if not PROVIDER_ORDER:
@@ -844,6 +884,41 @@ async def check_creator_messages(bot: Bot):
         logger.error(f"Ошибка проверки команд создателя: {e}")
 
 # ===================== ПУБЛИКАЦИЯ ПОСТА =====================
+async def maybe_create_quiz(bot: Bot, news_list: list, main_news: dict):
+    """С небольшой вероятностью создаёт квиз по случайной новости (не главной)."""
+    import random
+    if random.random() > QUIZ_PROBABILITY:
+        return  # не повезло
+
+    if not TG_GROUP_ID:
+        return
+
+    # Выбираем новость, отличную от главной
+    candidates = [n for n in news_list if n['link'] != main_news['link']]
+    if not candidates:
+        candidates = news_list  # если других нет, берём любую
+
+    selected = random.choice(candidates)
+    logger.info(f"🎲 Выбрана новость для квиза: {selected['title'][:80]}")
+
+    quiz_data = generate_quiz_question(selected)
+    if not quiz_data:
+        logger.warning("Не удалось сгенерировать квиз.")
+        return
+
+    try:
+        await bot.send_poll(
+            chat_id=int(TG_GROUP_ID),
+            question=quiz_data['question'],
+            options=quiz_data['options'],
+            type="quiz",
+            correct_option_id=quiz_data['correct_option_id'],
+            is_anonymous=False,  # так честнее, но можно True
+        )
+        logger.info("📊 Квиз отправлен в группу.")
+    except Exception as e:
+        logger.warning(f"Не удалось отправить квиз: {e}")
+
 async def publish_new_post(bot: Bot):
     logger.info("📝 Публикация нового поста...")
     try:
@@ -868,18 +943,22 @@ async def publish_new_post(bot: Bot):
                 for news in news_list:
                     save_published_news(news['link'], news['title'])
                 await bot.send_message(chat_id=CREATOR_ID, text="Пост опубликован")
+                await maybe_create_quiz(bot, news_list, top_news)
             else:
                 await bot.send_message(chat_id=CREATOR_ID, text="Ошибка публикации фото")
         else:
             logger.info("⚠️ Не удалось получить изображение, отправляю только текст.")
             success, msg_id = await send_telegram_message(int(TG_CHANNEL_ID), post_content, bot)
+            
             if success and msg_id:
                 save_post(msg_id, post_content)
                 for news in news_list:
                     save_published_news(news['link'], news['title'])
                 await bot.send_message(chat_id=CREATOR_ID, text="Пост опубликован (без фото)")
+                await maybe_create_quiz(bot, news_list, top_news)
             else:
                 await bot.send_message(chat_id=CREATOR_ID, text="Ошибка публикации текста")
+                
     except Exception as e:
         error_msg = f"Критическая ошибка: {str(e)}"
         logger.error(error_msg)
