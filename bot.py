@@ -291,7 +291,10 @@ def calculate_priority(news_item):
     for kw in KEYWORDS:
         if kw in text:
             keyword_boost -= 1
-    return source_priority + keyword_boost
+    # приоритет по свежести: чем моложе, тем меньше число (0 – сейчас, 1 – час назад)
+    age_hours = news_item.get('age_hours', 0)
+    freshness_priority = age_hours * 0.5  # коэффициент, можно подбирать
+    return source_priority + keyword_boost + freshness_priority
 
 def fetch_fresh_news(limit: int = 5):
     logger.info("📰 Запрашиваю свежие новости...")
@@ -319,11 +322,17 @@ def fetch_fresh_news(limit: int = 5):
                     continue
                 title = entry.get('title', 'Без заголовка')
                 summary = re.sub('<[^<]+?>', '', entry.get('summary', ''))[:500]
+                pub_date = parse_rss_date(entry)
+                if pub_date is None:
+                    continue
+                age_hours = (datetime.now() - pub_date).total_seconds() / 3600
                 all_candidates.append({
                     'source': source['name'],
                     'title': title,
                     'link': link,
-                    'summary': summary
+                    'summary': summary,
+                    'pub_date': pub_date,
+                    'age_hours': age_hours,
                 })
         except Exception as e:
             logger.warning(f"    ⚠️ Ошибка {source['name']}: {e}")
@@ -701,6 +710,15 @@ def generate_quiz_question(news_item: dict) -> dict | None:
         logger.warning(f"Ошибка парсинга JSON для квиза: {e}")
         return None
 
+def fix_links(text: str) -> str:
+    """Исправляет ссылки, где URL оказался на следующей строке после названия в скобках."""
+    # Паттерн: [текст]\n(URL) или [текст] URL) и т.п.
+    # Сделаем просто: ищем строки, где после ] идёт что-то, похожее на http, но не в скобках
+    import re
+    # Заменяем [текст](\nhttp...) на правильный формат
+    fixed = re.sub(r'\[([^\]]+)\]\s*\(?\s*(https?://[^\s\)]+)\)?', r'[\1](\2)', text)
+    return fixed
+
 def generate_post(news_list):
     logger.info("🤖 Генерирую пост...")
     if not PROVIDER_ORDER:
@@ -721,7 +739,10 @@ def generate_post(news_list):
 Напиши пост. Начни: "{random_greeting}". Перескажи новости. В конце: "{random_closing}"
 """
     result = generate_with_fallback(prompt, max_tokens=800)
-    return result if result else "❌ Не удалось сгенерировать пост."
+    if result:
+        result = fix_links(result)   # исправляем возможные разорванные ссылки
+        return result
+    return "❌ Не удалось сгенерировать пост."
 
 def generate_reply(comment_text: str, post_content: str) -> str:
     prompt = f"""
