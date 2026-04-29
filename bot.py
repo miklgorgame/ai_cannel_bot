@@ -889,6 +889,7 @@ async def run_all(bot: Bot):
     await check_and_reply_to_comments(bot)
     await check_creator_messages(bot)
     await publish_new_post(bot)
+    await check_and_reply_to_comments(bot)
 
 async def run_check(bot: Bot):
     await check_and_reply_to_comments(bot)
