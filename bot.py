@@ -908,14 +908,14 @@ async def maybe_create_quiz(bot: Bot, news_list: list, main_news: dict):
 
     try:
         await bot.send_poll(
-            chat_id=int(TG_GROUP_ID),
+            chat_id=int(TG_CHANNEL_ID),
             question=quiz_data['question'],
             options=quiz_data['options'],
             type="quiz",
             correct_option_id=quiz_data['correct_option_id'],
-            is_anonymous=False,  # так честнее, но можно True
+            is_anonymous=True,  #  True/False
         )
-        logger.info("📊 Квиз отправлен в группу.")
+        logger.info("📊 Квиз отправлен в канал.")
     except Exception as e:
         logger.warning(f"Не удалось отправить квиз: {e}")
 
