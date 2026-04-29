@@ -33,7 +33,7 @@ TG_GROUP_ID = os.getenv("TG_GROUP_ID")
 CREATOR_ID = int(os.getenv("CREATOR_ID", "0"))
 PEXELS_API_KEY = os.getenv("PEXELS_API_KEY")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")  # новый ключ
-QUIZ_PROBABILITY = 1  # 15% шанс, что после поста появится квиз
+QUIZ_PROBABILITY = 0,4  # 40% шанс, что после поста появится квиз
 
 TEST_MODE = os.getenv("TEST_MODE", "false").lower() == "true"
 
@@ -48,7 +48,7 @@ COMMENTS_CHAT_ID = int(TG_GROUP_ID) if TG_GROUP_ID else (int(TG_CHANNEL_ID) if T
 MAX_NEWS_AGE_DAYS = 2
 
 SOURCE_PRIORITY = {
-    "Habr": 1, "iXBT": 2, "3DNews": 3, "SecurityLab": 4,
+    "Habr": 1, "iXBT": 2, "3DNews": 3, "SecurityLab": 1,
     "vc.ru": 5, "Kod": 6, "CNews": 7, "Ferra": 8, "Overclockers": 9,
 }
 
@@ -300,11 +300,11 @@ def fetch_fresh_news(limit: int = 5):
     logger.info("📰 Запрашиваю свежие новости...")
     news_sources = [
         {"name": "Habr", "url": "https://habr.com/ru/rss/articles/?fl=ru"},
+        {"name": "SecurityLab", "url": "https://www.securitylab.ru/_services/export/rss/vulnerabilities/"},
         {"name": "3DNews", "url": "https://3dnews.ru/news/rss/"},
         {"name": "CNews", "url": "https://www.cnews.ru/inc/rss/news.xml"},
         {"name": "iXBT", "url": "https://www.ixbt.com/export/news.rss"},
         {"name": "Ferra", "url": "https://www.ferra.ru/exports/rss.xml"},
-        {"name": "SecurityLab", "url": "https://www.securitylab.ru/_services/export/rss/vulnerabilities/"},
         {"name": "vc.ru", "url": "https://vc.ru/rss/"},
         {"name": "Kod", "url": "https://kod.ru/rss/"},
         {"name": "Overclockers", "url": "https://overclockers.ru/rss/news.rss"},
