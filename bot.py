@@ -728,6 +728,14 @@ async def check_and_reply_to_comments(bot: Bot):
         logger.info(f"📨 Получено сообщение: chat={msg.chat_id} msg_id={msg.message_id}{reply_info} текст={text_preview!r}")
 
         reply_to = msg.reply_to_message
+        # Удаляем дубликаты от канала с фото
+if msg.sender_chat and msg.sender_chat.id == int(TG_CHANNEL_ID) and msg.photo:
+    try:
+        await bot.delete_message(chat_id=msg.chat_id, message_id=msg.message_id)
+        logger.info(f"🗑️ Удалён дубликат с фото от канала (msg_id={msg.message_id})")
+    except Exception as e:
+        logger.warning(f"Не удалось удалить дубликат: {e}")
+    continue   # идём к следующему сообщению, это не комментарий
         if not reply_to:
             logger.info("   -> не ответ на сообщение, пропускаем")
             continue
@@ -849,11 +857,10 @@ async def publish_new_post(bot: Bot):
         if not image and HF_API_TOKEN:
             image = generate_image(f"{top_news['title']} {top_news['summary']}")
         if image:
-            success, msg_id = await send_telegram_photo(int(TG_CHANNEL_ID), image, post_content, bot)
-            if success and msg_id:
-                logger.info(f"Фото отправлено, message_id={msg_id}")
-                await delete_duplicate_from_group(msg_id, post_content, bot)
-                save_post(msg_id, post_content)
+    success, msg_id = await send_telegram_photo(int(TG_CHANNEL_ID), image, post_content, bot)
+    if success and msg_id:
+        logger.info(f"Фото отправлено, message_id={msg_id}")
+        save_post(msg_id, post_content)
                 for news in news_list:
                     save_published_news(news['link'], news['title'])
                 await bot.send_message(chat_id=CREATOR_ID, text="Пост опубликован")
