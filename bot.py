@@ -708,6 +708,9 @@ async def check_and_reply_to_comments(bot: Bot):
     max_id = offset - 1
     processed_count = 0
 
+    # Список для ID дубликатов, которые нужно удалить
+    duplicates_to_delete = []
+
     for update in updates:
         if update.update_id > max_id:
             max_id = update.update_id
@@ -727,29 +730,23 @@ async def check_and_reply_to_comments(bot: Bot):
         text_preview = (msg.text or msg.caption or "[не текст]")[:100]
         logger.info(f"📨 Получено сообщение: chat={msg.chat_id} msg_id={msg.message_id}{reply_info} текст={text_preview!r}")
 
-        # Удаляем дубликаты от канала с фото
+        # --- Нашли дубликат (фото от канала) → запоминаем, но пока не удаляем ---
         if msg.sender_chat and msg.sender_chat.id == int(TG_CHANNEL_ID) and msg.photo:
-            try:
-                await bot.delete_message(chat_id=msg.chat_id, message_id=msg.message_id)
-                logger.info(f"🗑️ Удалён дубликат с фото от канала (msg_id={msg.message_id})")
-            except Exception as e:
-                logger.warning(f"Не удалось удалить дубликат: {e}")
-            continue   # идём к следующему сообщению, это не комментарий
+            duplicates_to_delete.append(msg.message_id)
+            logger.info(f"🔍 Обнаружен дубликат (msg_id={msg.message_id}), будет удалён позже")
+            continue   # это не комментарий, идём дальше
 
+        # --- Обработка комментариев (без изменений) ---
         reply_to = msg.reply_to_message
         if not reply_to:
             logger.info("   -> не ответ на сообщение, пропускаем")
             continue
 
-        # 👇 ПРОВЕРКА, ЧТО ОТВЕТИЛИ НА ПОСТ БОТА / КАНАЛА
         tg_channel_id = int(TG_CHANNEL_ID)
         is_our_post = False
-
-        # случай 1: дубликат от имени канала (sender_chat)
         if reply_to.sender_chat and reply_to.sender_chat.id == tg_channel_id:
             is_our_post = True
             logger.info("   -> ответ на пост канала (определён по sender_chat)")
-        # случай 2: оригинальное сообщение от самого бота (в канале так не отвечают, но на всякий случай)
         elif reply_to.from_user and reply_to.from_user.id == bot.id:
             is_our_post = True
             logger.info("   -> ответ на пост бота (определён по from_user)")
@@ -758,8 +755,6 @@ async def check_and_reply_to_comments(bot: Bot):
             logger.info("   -> сообщение не от канала/бота, пропускаем")
             continue
 
-        # Теперь у нас есть гарантия, что это ответ на наш пост.
-        # Можем сразу взять текст поста из reply_to (caption или text)
         post_content = reply_to.caption or reply_to.text or ""
         if not post_content:
             logger.info("   -> пост не содержит текста, невозможно сгенерировать ответ")
@@ -788,7 +783,7 @@ async def check_and_reply_to_comments(bot: Bot):
                     parse_mode="MarkdownV2"
                 )
                 logger.info(f"✅ Отправлен ответ на комментарий {comment_id}")
-                mark_comment_processed(comment_id, 0)  # id поста нам неважен, передадим 0
+                mark_comment_processed(comment_id, 0)
                 processed_count += 1
             except Exception as e:
                 if "can't parse entities" in str(e).lower():
@@ -808,10 +803,18 @@ async def check_and_reply_to_comments(bot: Bot):
         else:
             logger.warning(f"Не удалось сгенерировать ответ на комментарий {comment_id}")
 
+    # --- Удаляем все собранные дубликаты ---
+    for dup_id in duplicates_to_delete:
+        try:
+            await bot.delete_message(chat_id=COMMENTS_CHAT_ID, message_id=dup_id)
+            logger.info(f"🗑️ Удалён дубликат (msg_id={dup_id})")
+        except Exception as e:
+            logger.warning(f"Не удалось удалить дубликат {dup_id}: {e}")
+
     if max_id >= offset:
         save_comments_offset(max_id + 1)
 
-    logger.info(f"Обработано новых комментариев: {processed_count}")
+    logger.info(f"Обработано новых комментариев: {processed_count} (удалено дубликатов: {len(duplicates_to_delete)})")
 # ===================== КОМАНДЫ СОЗДАТЕЛЯ =====================
 async def check_creator_messages(bot: Bot):
     logger.info("👤 Проверяю сообщения создателя...")
