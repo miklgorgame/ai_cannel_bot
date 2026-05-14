@@ -771,6 +771,7 @@ def generate_post(news_list):
 Напиши пост. Начни: "{random_greeting}"(обязательно экранируй если это не разметка). Перескажи новости. В конце: "{random_closing}"(обязательно экранируй если это не разметка)
 """
     result = generate_with_fallback(prompt, max_tokens=800)
+    print(result)
     if result:
         result = fix_links(result)   # исправляем возможные разорванные ссылки
         return result
