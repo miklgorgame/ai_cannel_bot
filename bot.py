@@ -508,17 +508,29 @@ async def delete_duplicate_from_group(photo_message_id: int, post_text: str, bot
 # ===================== ГЕНЕРАЦИЯ ТЕКСТА (Groq + HF) =====================
 # ---------- НОВЫЕ ПРОВАЙДЕРЫ ----------
 def twelver_generate(prompt: str, max_tokens: int = 800) -> str | None:
-    api_key = os.getenv("TWELVER_API_KEY", "sk-55babe8f0aeea9786827ce4a1bade0c50468e3cb8b2b9d8d")
+    # 1. Получаем ключ из переменных окружения. 
+    # Если ключа нет, возвращаем None сразу, чтобы не падать с ошибкой позже.
+    api_key = os.getenv("TWELVER_API_KEY")
+    
+    if not api_key:
+        # Логируем предупреждение, но не крашим бота, чтобы он мог перейти к следующему провайдеру
+        logger.warning("⚠️ TWELVER_API_KEY не найден в переменных окружения. Пропускаем Twelver.")
+        return None
+
     base_url = "https://twelver.ru/api/ai/c7e9d747-ffbe-4027-9c48-8541c5302b72/v1"
+    
     try:
+        # Инициализируем клиент OpenAI с полученным ключом
         client = OpenAI(api_key=api_key, base_url=base_url)
+        
         resp = client.chat.completions.create(
-            model="auto",
+            model="auto", # или конкретная модель, если нужно
             messages=[{"role": "user", "content": prompt}],
             max_tokens=max_tokens,
             temperature=0.8,
         )
         return resp.choices[0].message.content.strip()
+        
     except Exception as e:
         logger.warning(f"Twelver error: {e}")
         return None
