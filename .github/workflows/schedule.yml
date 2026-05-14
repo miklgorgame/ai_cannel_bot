@@ -57,7 +57,7 @@ jobs:
           TG_GROUP_ID: ${{ secrets.TG_GROUP_ID }}
           CREATOR_ID: ${{ secrets.CREATOR_ID }}
           PEXELS_API_KEY: ${{ secrets.PEXELS_API_KEY }}
-          TWELVER_API_KEY: ${{ secrets.TWELVER_API_KEY }}
+          
           GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}   # 🔑 ДОБАВЛЕНО!
           TEST_MODE: ${{ github.event.inputs.test_mode || 'false' }}
         run: python bot.py
