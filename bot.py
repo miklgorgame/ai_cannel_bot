@@ -98,6 +98,24 @@ __курсив__
 
 В режиме MarkdownV2 специальные символы требуют экранирования обратным слешем: _ * [ ] ( ) ~ ` > # + - = | { } . !
 Экранируй их в тексте, но не в разметке (например, звёздочки для жирного не экранируй).
+Неправильный пример:
+[Habr: Rust стек](https://habr\.com/ru/articles/1034274/?utm_source=habrahabr&utm_medium=rss&utm_campaign=1034274)  
+[Habr: Стереотипы алгоритмов](https://habr\.com/ru/articles/1034476/?utm_source=habrahabr&utm_medium=rss&utm_campaign=1034476)  
+[Habr: Корпоративное обучение](https://habr\.com/ru/companies/teamly/articles/1034498/?utm_source=habrahabr&utm_medium=rss&utm_campaign=1034498)  
+[Habr: Mythos и CVE](https://habr\.com/ru/articles/1034376/?utm_source=habrahabr&utm_medium=rss&utm_campaign=1034376)  
+[Habr: ИИ и экономика](https://habr\.com/ru/companies/tsnis/articles/1034496/?utm_source=habrahabr&utm_medium=rss&utm_campaign=1034496)
+Неправильный пример:
+[Habr: CSS\-карусели без JS](https://habr.com/ru/articles/1034960/?utm_source=habrahabr&utm_medium=rss&utm_campaign=1034960)  
+[Habr: Вам не нужен OpenClaw](https://habr.com/ru/articles/1029326/?utm_source=habrahabr&utm_medium=rss&utm_campaign=1029326)  
+[Habr: Техники промптинга](https://habr.com/ru/companies/alpinadigital/articles/1034954/?utm_source=habrahabr&utm_medium=rss&utm_campaign=1034954)  
+[Habr: System Design шашлыка](https://habr.com/ru/articles/1034968/?utm_source=habrahabr&utm_medium=rss&utm_campaign=1034968)  
+[Habr: Топ российских PM\-систем](https://habr.com/ru/companies/projecto/articles/1033080/?utm_source=habrahabr&utm_medium=rss&utm_campaign=1033080)
+Правильный пример:
+Intel и SambaNova (https://habr.com/ru/companies/ru_mts/articles/1033082/?utm_source=habrahabr&utm_medium=rss&utm_campaign=1033082)  
+ИИ для презентаций (https://habr.com/ru/companies/ranvik/articles/1033316/?utm_source=habrahabr&utm_medium=rss&utm_campaign=1033316)  
+Dunder-методы (https://habr.com/ru/articles/1033432/?utm_source=habrahabr&utm_medium=rss&utm_campaign=1033432)  
+TTL-разъём (https://habr.com/ru/articles/1033446/?utm_source=habrahabr&utm_medium=rss&utm_campaign=1033446)  
+Гитарный Linux (https://habr.com/ru/articles/1032914/?utm_source=habrahabr&utm_medium=rss&utm_campaign=1032914)
 """
 
 # ===================== МОДЕЛИ =====================
