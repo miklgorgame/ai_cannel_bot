@@ -98,26 +98,54 @@ __курсив__
 ||скрытый текст||
 [ссылка](https://ya.ru/)
 
-В режиме MarkdownV2 специальные символы требуют экранирования обратным слешем: _ * [ ] ( ) ~ ` > # + - = | { } . !
-Экранируй их в тексте, но не в разметке (например, звёздочки для жирного не экранируй).НЕЛЬЗЯ экранировать содержимое например ссылок (ссылка название)
-ОБЯзательно экранируй где надо  ! и .
-комментариях! 💬 → комментариях\! 💬
-Неправильные примеры:
-// Лишнее экранирование внутри URL
-[Habr: Rust](https://habr\.com/ru/articles/1034274/)
+*bold \*text*
+_italic \*text_
+__underline__
+~strikethrough~
+||spoiler||
+*bold _italic bold ~italic bold strikethrough ||italic bold strikethrough spoiler||~ __underline italic bold___ bold*
+[inline URL](http://www.example.com/)
+[inline mention of a user](tg://user?id=123456789)
+![👍](tg://emoji?id=5368324170671202286)
+![22:45 tomorrow](tg://time?unix=1647531900&format=wDT)
+![22:45 tomorrow](tg://time?unix=1647531900&format=t)
+![22:45 tomorrow](tg://time?unix=1647531900&format=r)
+![22:45 tomorrow](tg://time?unix=1647531900)
+`inline fixed-width code`
+```
+pre-formatted fixed-width code block
+```
+```python
+pre-formatted fixed-width code block written in the Python programming language
+```
+>Block quotation started
+>Block quotation continued
+>Block quotation continued
+>Block quotation continued
+>The last line of the block quotation
+**>The expandable block quotation started right after the previous block quotation
+>It is separated from the previous block quotation by an empty bold entity
+>Expandable block quotation continued
+>Hidden by default part of the expandable block quotation started
+>Expandable block quotation continued
+>The last line of the expandable block quotation with the expandability mark||
+Примеры:
+// 1. Точки в URL экранировать НЕ нужно
+[Habr: Rust](https://habr.com/ru/articles/1034274/)
 
-// Экранирование точки в домене
-[Статья](http://example\.com/page)
+// 2. Точки в домене экранировать НЕ нужно
+[Статья](http://example.com/page)
 
-// Экранирование подчёркивания внутри текста ссылки
+// 3. Подчёркивание в ТЕКСТЕ ссылки нужно экранировать, так как _ это курсив
 [Текст\_с\_подчёркиванием](https://ya.ru)
 
-// Экранирование скобки внутри URL
-[Ссылка](https://site.com/page\))
-Правильные примеры:
-[Habr: Новости Python](https://habr.com/ru/articles/123456/)
-[GitHub: репозиторий](https://github.com/user/repo)
-[Статья про _подчёркивания_ в тексте](https://example.com)
+// 4. Закрывающая скобка в URL должна быть экранирована, иначе парсер подумает, что ссылка закончилась
+[Ссылка со скобкой](https://site.com/page\))
+
+// 5. Если в тексте ссылки есть жирный шрифт или курсив — экранируем спецсимволы
+[Обычный текст](https://example.com)
+[Текст с *звёздочкой*](https://example.com) -> Ошибка!
+[Текст с \*звёздочкой\*](https://example.com) -> Верно!
 """
 
 # ===================== МОДЕЛИ =====================
