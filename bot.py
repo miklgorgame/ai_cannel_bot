@@ -746,7 +746,7 @@ def generate_quiz_question(news_item: dict) -> dict | None:
 На основе новости составь ВОПРОС и 4 варианта ответа (один правильный) для викторины.
 Ответ должен быть СТРОГО в JSON формате:
 {{"question": "...", "options": ["...", "..."], "correct_option_id": 0}}
-Вопрос должен быть интересным, варианты — правдоподобными.
+Вопрос должен быть интересным, варианты - правдоподобными.   # ← здесь заменил длинное тире на дефис
 
 Новость:
 Источник: {news_item['source']}
@@ -774,7 +774,7 @@ def generate_quiz_question(news_item: dict) -> dict | None:
     except json.JSONDecodeError as e:
         logger.warning(f"Ошибка парсинга JSON для квиза: {e}")
         return None
-
+        
 def fix_links(text: str) -> str:
     """Исправляет ссылки, где URL оказался на следующей строке после названия в скобках."""
     # Паттерн: [текст]\n(URL) или [текст] URL) и т.п.
