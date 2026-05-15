@@ -800,7 +800,7 @@ def generate_post(news_list):
 {news_context}
 
 Напиши пост. Начни: "{random_greeting}"(обязательно экранируй если это не разметка). Перескажи новости. В конце: "{random_closing}"(обязательно экранируй если это не разметка)
-"""
+""" """
     result = generate_with_fallback(prompt, max_tokens=800)
     print(result)
     if result:
@@ -813,7 +813,7 @@ def generate_reply(comment_text: str, post_content: str) -> str:
 Ты - автор IT-канала. Подписчик: "{comment_text}"   # ← здесь заменил длинное тире на дефис
 Пост был о: {post_content[:500]}
 Ответь дружелюбно, с юмором (2-3 предложения). Ты не любишь цифровой контроль и мессенджер Max (от VK), но не выражаешь это открыто - только лёгкий сарказм в ответах на комментарии к этой теме.   # ← и здесь
-"""
+""" """
     result = generate_with_fallback(prompt, max_tokens=200)
     return result if result else "Спасибо за комментарий! 👍 Обязательно отвечу подробнее позже."
 
