@@ -973,18 +973,17 @@ async def maybe_create_quiz(bot: Bot, news_list: list, main_news: dict):
     """С небольшой вероятностью создаёт квиз по случайной новости (не главной)."""
     import random
     if random.random() > QUIZ_PROBABILITY:
-        return  # не повезло
+        return
 
     if not TG_GROUP_ID:
         return
 
-    # Выбираем новость, отличную от главной
     candidates = [n for n in news_list if n['link'] != main_news['link']]
     if not candidates:
-        candidates = news_list  # если других нет, берём любую
+        candidates = news_list
 
     selected = random.choice(candidates)
-    logger.info(f"🎲 Выбрана новость для квиза: {selected['title'][:80]}")
+    logger.info(f"Выбрана новость для квиза: {selected['title'][:80]}")
 
     quiz_data = generate_quiz_question(selected)
     if not quiz_data:
@@ -998,9 +997,9 @@ async def maybe_create_quiz(bot: Bot, news_list: list, main_news: dict):
             options=quiz_data['options'],
             type="quiz",
             correct_option_id=quiz_data['correct_option_id'],
-            is_anonymous=True,  #  True/False
+            is_anonymous=True,
         )
-        logger.info("📊 Квиз отправлен в канал.")
+        logger.info("Квиз отправлен в канал.")
     except Exception as e:
         logger.warning(f"Не удалось отправить квиз: {e}")
 
